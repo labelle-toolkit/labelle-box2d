@@ -68,6 +68,19 @@ pub const Systems = struct {
 var world_id: b2.b2WorldId = undefined;
 var initialized: bool = false;
 
+/// Gizmo categories exported by this plugin.
+/// Auto-discovered by the debug inspector at comptime.
+pub const GizmoCategories = struct {
+    pub const Collision: u8 = 1;
+    pub const Physics: u8 = 2;
+    pub const Sensor: u8 = 3;
+};
+
+// Convenience aliases
+pub const GIZMO_COLLISION: u8 = GizmoCategories.Collision;
+pub const GIZMO_PHYSICS: u8 = GizmoCategories.Physics;
+pub const GIZMO_SENSOR: u8 = GizmoCategories.Sensor;
+
 /// Pixels-per-meter conversion factor.
 pub var ppm: f32 = 50.0;
 /// Show debug gizmo arrows on collisions.
@@ -494,7 +507,7 @@ fn processContacts(game: anytype) void {
         if (show_collision_gizmos) {
             const pa = b2.b2Body_GetPosition(body_a);
             const pb = b2.b2Body_GetPosition(body_b);
-            game.drawGizmoArrow(pa.x * ppm, pa.y * ppm, pb.x * ppm, pb.y * ppm, 0xFF00FF00);
+            game.drawGizmoArrowCategory(GIZMO_COLLISION, pa.x * ppm, pa.y * ppm, pb.x * ppm, pb.y * ppm, 0xFF00FF00);
         }
 
         if (on_collision_begin) |cb| cb(entity_a, entity_b);
@@ -520,7 +533,7 @@ fn processContacts(game: anytype) void {
         if (show_collision_gizmos) {
             const hx = event.point.x * ppm;
             const hy = event.point.y * ppm;
-            game.drawGizmoArrow(hx, hy, hx + event.normal.x * event.approachSpeed * 15, hy + event.normal.y * event.approachSpeed * 15, 0xFFFF0000);
+            game.drawGizmoArrowCategory(GIZMO_PHYSICS, hx, hy, hx + event.normal.x * event.approachSpeed * 15, hy + event.normal.y * event.approachSpeed * 15, 0xFFFF0000);
         }
 
         if (on_collision_hit) |cb| cb(entity_a, entity_b, event.point.x * ppm, event.point.y * ppm, event.normal.x, event.normal.y, event.approachSpeed);
@@ -543,7 +556,7 @@ fn processSensorEvents(game: anytype) void {
             const vb = b2.b2Shape_GetBody(event.visitorShapeId);
             const sp = b2.b2Body_GetPosition(sb);
             const vp = b2.b2Body_GetPosition(vb);
-            game.drawGizmoArrow(sp.x * ppm, sp.y * ppm, vp.x * ppm, vp.y * ppm, 0xFFFFFF00); // yellow
+            game.drawGizmoArrowCategory(GIZMO_SENSOR, sp.x * ppm, sp.y * ppm, vp.x * ppm, vp.y * ppm, 0xFFFFFF00);
         }
 
         if (on_sensor_enter) |cb| cb(sensor_entity, visitor_entity);
