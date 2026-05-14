@@ -2,18 +2,18 @@
     .fingerprint = 0x7303f0090a923640,
     .name = .labelle_box2d,
     .version = "0.1.0",
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .box2d_c = .{
-            .url = "https://github.com/allyourcodebase/box2d/archive/refs/heads/main.tar.gz",
-            .hash = "box2d-3.1.1-crFBk74aAAD-TJGY5mHVDB0sV5JntTq0MnlaHYxb5yl5",
+            .url = "git+https://github.com/apotema/box2d.git?ref=feat/zig-0.16-migration#4e0953696a94081344ae12da037c38742dbd326a",
+            .hash = "box2d-3.1.1-crFBkxsKAACFY700RCnH9-kxeQ_jOBFlSKcZFagiCOyT",
         },
         // labelle-core is injected by the assembler's addImport at build time.
         // This declaration allows the package to be fetched remotely and provides
         // a fallback version for standalone builds/tests.
         .labelle_core = .{
-            .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.3.0.tar.gz",
-            .hash = "labelle_core-1.3.0-OauRcGfsAABLolER_kU3vW1PBhHNzHKwsX2xnDrNcJ6N",
+            .url = "git+https://github.com/labelle-toolkit/labelle-core.git?ref=feat/zig-0.16-migration#58e6f46b9fbadc045d03190d3fe6d87ebb737f9b",
+            .hash = "labelle_core-1.12.0-OauRcB_UAQB5eBzggTDo77K9NZilrushKnR3kTOaKvRM",
             .lazy = true,
         },
     },
