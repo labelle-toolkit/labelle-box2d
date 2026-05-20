@@ -5,15 +5,15 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .box2d_c = .{
-            .url = "git+https://github.com/apotema/box2d.git?ref=feat/zig-0.16-migration#4e0953696a94081344ae12da037c38742dbd326a",
+            .url = "git+https://github.com/labelle-toolkit/box2d.git?ref=v3.1.1-zig#4e0953696a94081344ae12da037c38742dbd326a",
             .hash = "box2d-3.1.1-crFBkxsKAACFY700RCnH9-kxeQ_jOBFlSKcZFagiCOyT",
         },
         // labelle-core is injected by the assembler's addImport at build time.
         // This declaration allows the package to be fetched remotely and provides
         // a fallback version for standalone builds/tests.
         .labelle_core = .{
-            .url = "git+https://github.com/labelle-toolkit/labelle-core.git?ref=feat/zig-0.16-migration#58e6f46b9fbadc045d03190d3fe6d87ebb737f9b",
-            .hash = "labelle_core-1.12.0-OauRcB_UAQB5eBzggTDo77K9NZilrushKnR3kTOaKvRM",
+            .url = "git+https://github.com/labelle-toolkit/labelle-core.git?ref=v1.13.0#a6516a2128a7fc1b7bebb467cf973188384d9dc1",
+            .hash = "labelle_core-1.13.0-OauRcPfTAQA1stEX2tEpNage5SiPaQnB-j40qY1yOA4S",
             .lazy = true,
         },
     },
