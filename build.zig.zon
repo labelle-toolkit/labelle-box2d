@@ -16,6 +16,17 @@
             .hash = "labelle_core-1.13.0-OauRcPfTAQA1stEX2tEpNage5SiPaQnB-j40qY1yOA4S",
             .lazy = true,
         },
+        // emsdk is needed at WASM build time so we can plumb the
+        // emscripten sysroot include path into the box2d C compile —
+        // Zig does not ship libc headers for `wasm32-emscripten`, so
+        // <math.h>/<stdlib.h>/etc. live only in emscripten's sysroot.
+        // Lazy: only fetched when actually cross-compiling to wasm.
+        // Same version the rest of the toolkit pins (labelle-sokol).
+        .emsdk = .{
+            .url = "git+https://github.com/emscripten-core/emsdk#4.0.9",
+            .hash = "N-V-__8AAJl1DwBezhYo_VE6f53mPVm00R-Fk28NPW7P14EQ",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
