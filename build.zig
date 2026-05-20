@@ -36,4 +36,9 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("labelle_core", .{ .target = target, .optimize = optimize })) |core_dep| {
         mod.addImport("labelle-core", core_dep.module("labelle-core"));
     }
+
+    // Test step — compiles and analyses src/root.zig standalone.
+    const tests = b.addTest(.{ .root_module = mod });
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
 }
