@@ -55,10 +55,14 @@ pub fn build(b: *std.Build) void {
         // box2d_c uses `-mcpu baseline` for wasm32, so the SSE2
         // intrinsics fail to compile. Force box2d's scalar
         // (`B2_SIMD_NONE`) path — a fully supported box2d
-        // configuration — by defining `BOX2D_DISABLE_SIMD` on the C
-        // library compile. Only for emscripten; desktop / iOS /
-        // Android keep their native SIMD path.
+        // configuration — by defining `BOX2D_DISABLE_SIMD`. Define it
+        // on both the C library compile AND the plugin module: `mod`
+        // (`src/root.zig`) `@cImport`s box2d's headers, and that
+        // translation hits the same `core.h` SSE2 branch unless the
+        // macro is set for the cImport too. Only for emscripten;
+        // desktop / iOS / Android keep their native SIMD path.
         box2d_lib.root_module.addCMacro("BOX2D_DISABLE_SIMD", "1");
+        mod.addCMacro("BOX2D_DISABLE_SIMD", "1");
     }
 
     // labelle-core: injected by the assembler at build time via addImport.
