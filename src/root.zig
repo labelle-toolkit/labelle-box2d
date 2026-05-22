@@ -409,7 +409,7 @@ pub fn rayCast(origin_x: f32, origin_y: f32, target_x: f32, target_y: f32) RayRe
     const result = b2.b2World_CastRayClosest(world_id, origin, translation, filter);
 
     if (result.hit) {
-        const entity = entityFromShape(result.shapeId);
+        const entity = entityFromShape(result.shapeId) orelse 0;
         return .{
             .hit = true,
             .point_x = result.point.x * ppm,
@@ -451,7 +451,7 @@ fn syncNewBodies(game: anytype) void {
         body_def.angularDamping = body.angular_damping;
         body_def.fixedRotation = body.fixed_rotation;
         body_def.isBullet = body.bullet;
-        body_def.userData = @ptrFromInt(@as(usize, result.entity));
+        body_def.userData = @ptrFromInt(@as(usize, result.entity) + 1);
 
         body._body_id = b2.b2CreateBody(world_id, &body_def);
         body._synced = true;
@@ -497,9 +497,8 @@ fn processContacts(game: anytype) void {
         const event = events.beginEvents[i];
         const body_a = b2.b2Shape_GetBody(event.shapeIdA);
         const body_b = b2.b2Shape_GetBody(event.shapeIdB);
-        const entity_a = entityFromBody(body_a);
-        const entity_b = entityFromBody(body_b);
-        if (entity_a == 0 or entity_b == 0) continue;
+        const entity_a = entityFromBody(body_a) orelse continue;
+        const entity_b = entityFromBody(body_b) orelse continue;
 
         if (game.ecs_backend.getComponent(entity_a, PhysicsTouching)) |t| t.add(entity_b);
         if (game.ecs_backend.getComponent(entity_b, PhysicsTouching)) |t| t.add(entity_a);
@@ -515,9 +514,8 @@ fn processContacts(game: anytype) void {
 
     for (0..@intCast(events.endCount)) |i| {
         const event = events.endEvents[i];
-        const entity_a = entityFromBody(b2.b2Shape_GetBody(event.shapeIdA));
-        const entity_b = entityFromBody(b2.b2Shape_GetBody(event.shapeIdB));
-        if (entity_a == 0 or entity_b == 0) continue;
+        const entity_a = entityFromBody(b2.b2Shape_GetBody(event.shapeIdA)) orelse continue;
+        const entity_b = entityFromBody(b2.b2Shape_GetBody(event.shapeIdB)) orelse continue;
 
         if (game.ecs_backend.getComponent(entity_a, PhysicsTouching)) |t| t.remove(entity_b);
         if (game.ecs_backend.getComponent(entity_b, PhysicsTouching)) |t| t.remove(entity_a);
@@ -526,9 +524,8 @@ fn processContacts(game: anytype) void {
 
     for (0..@intCast(events.hitCount)) |i| {
         const event = events.hitEvents[i];
-        const entity_a = entityFromBody(b2.b2Shape_GetBody(event.shapeIdA));
-        const entity_b = entityFromBody(b2.b2Shape_GetBody(event.shapeIdB));
-        if (entity_a == 0 or entity_b == 0) continue;
+        const entity_a = entityFromBody(b2.b2Shape_GetBody(event.shapeIdA)) orelse continue;
+        const entity_b = entityFromBody(b2.b2Shape_GetBody(event.shapeIdB)) orelse continue;
 
         if (show_collision_gizmos) {
             const hx = event.point.x * ppm;
@@ -545,9 +542,8 @@ fn processSensorEvents(game: anytype) void {
 
     for (0..@intCast(events.beginCount)) |i| {
         const event = events.beginEvents[i];
-        const sensor_entity = entityFromShape(event.sensorShapeId);
-        const visitor_entity = entityFromShape(event.visitorShapeId);
-        if (sensor_entity == 0 or visitor_entity == 0) continue;
+        const sensor_entity = entityFromShape(event.sensorShapeId) orelse continue;
+        const visitor_entity = entityFromShape(event.visitorShapeId) orelse continue;
 
         if (game.ecs_backend.getComponent(sensor_entity, PhysicsSensor)) |s| s.add(visitor_entity);
 
@@ -564,22 +560,23 @@ fn processSensorEvents(game: anytype) void {
 
     for (0..@intCast(events.endCount)) |i| {
         const event = events.endEvents[i];
-        const sensor_entity = entityFromShape(event.sensorShapeId);
-        const visitor_entity = entityFromShape(event.visitorShapeId);
-        if (sensor_entity == 0 or visitor_entity == 0) continue;
+        const sensor_entity = entityFromShape(event.sensorShapeId) orelse continue;
+        const visitor_entity = entityFromShape(event.visitorShapeId) orelse continue;
 
         if (game.ecs_backend.getComponent(sensor_entity, PhysicsSensor)) |s| s.remove(visitor_entity);
         if (on_sensor_exit) |cb| cb(sensor_entity, visitor_entity);
     }
 }
 
-fn entityFromBody(body_id: b2.b2BodyId) u32 {
+fn entityFromBody(body_id: b2.b2BodyId) ?u32 {
     const ptr = b2.b2Body_GetUserData(body_id);
-    if (ptr == null) return 0;
-    return @intCast(@intFromPtr(ptr));
+    if (ptr == null) return null;
+    // `userData` holds `entity + 1` (see body creation) so a valid
+    // entity 0 is a non-null pointer — distinct from "no userData".
+    return @intCast(@intFromPtr(ptr) - 1);
 }
 
-fn entityFromShape(shape_id: b2.b2ShapeId) u32 {
+fn entityFromShape(shape_id: b2.b2ShapeId) ?u32 {
     return entityFromBody(b2.b2Shape_GetBody(shape_id));
 }
 
