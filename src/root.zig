@@ -134,6 +134,30 @@ pub var ppm: f32 = 50.0;
 /// Show debug gizmo arrows on collisions.
 pub var show_collision_gizmos: bool = true;
 
+// ── DEPRECATED — raw-slot callbacks ───────────────────────────
+//
+// **DEPRECATED — see RFC-PLUGIN-EVENTS migration. Removed in next
+// release.**
+//
+// The `pub var on_collision_*` / `on_sensor_*` slots below are the v1
+// notification mechanism: a hand-written game would assign a
+// `?*const fn(...)` and the plugin would call it from
+// `processContacts` / `processSensorEvents`. RFC-PLUGIN-EVENTS phase 2
+// added `pub const Events` (above) and dual-emits through
+// `game.emit(.{ .box2d__... = ... })` alongside these slots so a v1
+// subscriber kept working through the migration window. Phase 6 (this
+// commit) converted every in-tree flow to the new `name` form
+// (flow-codegen `1182a80` + bouncing-ball `8a3b4c5`); no code path
+// inside the toolkit reads these slots anymore.
+//
+// **Removal plan.** A follow-up release drops these `pub var`s and the
+// matching `if (cb) |…| cb(...);` call sites in
+// `processContacts` / `processSensorEvents` below — the dual-emit
+// collapses to a single `game.emit`. New code MUST subscribe via a
+// hook-handler struct on the merged `PluginEvents` union (the same way
+// flow-codegen's new-form `OnEvent` emits the `FlowEventHandler`
+// struct).
+
 /// Collision callbacks.
 pub var on_collision_begin: ?*const fn (entity_a: u32, entity_b: u32) void = null;
 pub var on_collision_end: ?*const fn (entity_a: u32, entity_b: u32) void = null;
