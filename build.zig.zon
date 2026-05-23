@@ -11,9 +11,14 @@
         // labelle-core is injected by the assembler's addImport at build time.
         // This declaration allows the package to be fetched remotely and provides
         // a fallback version for standalone builds/tests.
+        //
+        // Pinned to the post-v1.13.1 main HEAD (2d742fb) for the
+        // RFC-FLOW-VOCABULARY phase 1 contracts (`FlowNode`, `PinSpec`,
+        // `PinStyle`, …) that this plugin's `FlowNodes` + `PinStyles`
+        // exports depend on. Bump to a tagged release once core cuts one.
         .labelle_core = .{
-            .url = "git+https://github.com/labelle-toolkit/labelle-core.git?ref=v1.13.0#a6516a2128a7fc1b7bebb467cf973188384d9dc1",
-            .hash = "labelle_core-1.13.0-OauRcPfTAQA1stEX2tEpNage5SiPaQnB-j40qY1yOA4S",
+            .url = "git+https://github.com/labelle-toolkit/labelle-core.git?ref=main#2d742fb8cceb176b13735cf60a09818cfe642800",
+            .hash = "labelle_core-1.13.1-OauRcKkKAgCLuMifRRaeH0Abd-gMeS9jMJLunoTViFph",
             .lazy = true,
         },
         // emsdk is needed at WASM build time so we can plumb the

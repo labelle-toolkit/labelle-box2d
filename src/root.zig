@@ -124,6 +124,271 @@ pub const Events = struct {
     };
 };
 
+// ── FlowNodes (RFC-FLOW-VOCABULARY phase 5) ────────────────────
+//
+// Palette-ready verbs the flow editor surfaces under a "box2d"
+// category. Each decl is a `core.flow.FlowNode(.{ .impl = … })`
+// factory call: reflection on `impl` produces pin names, types, and
+// the command/reporter kind; `.pins` overrides labels where the
+// generic param name doesn't read well.
+//
+// Discovered by the labelle-assembler plugin walk (parallel phase 2,
+// `labelle-assembler#177`); consumed by the flow-codegen `CustomNode`
+// lowering (later phase) and the labelle-gui palette (phase 4). Until
+// those land, this block is *additive* — no runtime behaviour change
+// for existing games.
+//
+// **First-param convention** (RFC §1): every `impl` takes
+// `game: anytype` first. flow-codegen threads the game pointer in at
+// codegen time; the remaining params become input pins. This is why
+// the wrappers below look up the `PhysicsBody` component from the
+// entity rather than taking a `*const PhysicsBody` directly the way
+// the underlying Zig-level helpers do — flows reason in entity IDs.
+pub const FlowNodes = struct {
+    pub const apply_impulse = core.flow.FlowNode(.{
+        .impl = flowApplyImpulse,
+        .docs = "Apply a linear impulse to the body's center of mass (pixels/s).",
+        .pins = .{
+            .ix = .{ .label = "Impulse X" },
+            .iy = .{ .label = "Impulse Y" },
+        },
+    });
+
+    pub const apply_force = core.flow.FlowNode(.{
+        .impl = flowApplyForce,
+        .docs = "Apply a force to the body's center of mass (pixels/s²).",
+        .pins = .{
+            .fx = .{ .label = "Force X" },
+            .fy = .{ .label = "Force Y" },
+        },
+    });
+
+    pub const apply_torque = core.flow.FlowNode(.{
+        .impl = flowApplyTorque,
+        .docs = "Apply a rotational torque to the body.",
+    });
+
+    pub const set_velocity = core.flow.FlowNode(.{
+        .impl = flowSetVelocity,
+        .docs = "Set the body's linear velocity directly (pixels/s).",
+        .pins = .{
+            .vx = .{ .label = "Velocity X" },
+            .vy = .{ .label = "Velocity Y" },
+        },
+    });
+
+    pub const get_velocity = core.flow.FlowNode(.{
+        .impl = flowGetVelocity,
+        .docs = "Read the body's linear velocity (pixels/s).",
+    });
+
+    pub const get_angular_velocity = core.flow.FlowNode(.{
+        .impl = flowGetAngularVelocity,
+        .docs = "Read the body's angular velocity (radians/s).",
+    });
+
+    pub const get_position = core.flow.FlowNode(.{
+        .impl = flowGetPosition,
+        .docs = "Read the entity's world-space position (pixels).",
+    });
+
+    pub const set_position = core.flow.FlowNode(.{
+        .impl = flowSetPosition,
+        .docs = "Teleport the body to a new world-space position (pixels).",
+    });
+
+    pub const get_angle = core.flow.FlowNode(.{
+        .impl = flowGetAngle,
+        .docs = "Read the body's rotation angle (radians).",
+    });
+
+    pub const set_angle = core.flow.FlowNode(.{
+        .impl = flowSetAngle,
+        .docs = "Set the body's rotation angle (radians).",
+    });
+
+    pub const get_mass = core.flow.FlowNode(.{
+        .impl = flowGetMass,
+        .docs = "Read the body's mass (kg).",
+    });
+
+    pub const ray_cast = core.flow.FlowNode(.{
+        .impl = flowRayCast,
+        .docs = "Cast a ray from origin to target (pixels). Returns the closest hit.",
+        .pins = .{
+            .origin_x = .{ .label = "Origin X" },
+            .origin_y = .{ .label = "Origin Y" },
+            .target_x = .{ .label = "Target X" },
+            .target_y = .{ .label = "Target Y" },
+        },
+    });
+
+    pub const body_at = core.flow.FlowNode(.{
+        .impl = flowBodyAt,
+        .docs = "Return the entity whose body contains the given world-space point, or 0 if none.",
+    });
+
+    pub const set_gravity = core.flow.FlowNode(.{
+        .impl = flowSetGravity,
+        .docs = "Set world gravity (pixels/s²).",
+        .pins = .{
+            .gx = .{ .label = "Gravity X" },
+            .gy = .{ .label = "Gravity Y" },
+        },
+    });
+};
+
+// ── PinStyles (RFC-FLOW-VOCABULARY phase 5) ────────────────────
+//
+// Display metadata for the nominal types this plugin exposes on flow
+// pins. Primitives (`u32`, `f32`, `bool`, …) are already covered by
+// `core.flow.default_pin_styles`; the entries below only style
+// box2d-specific types the editor would otherwise render with no
+// distinct color.
+//
+// Conventionally keyed by *type name* — the assembler walks
+// `@TypeOf(PinStyles)`'s decls and maps each decl name back to the
+// matching plugin-exported type at discovery time (phase 2).
+pub const PinStyles = struct {
+    /// `JointId` — cyan, distinct from the entity-id yellow + the
+    /// integer-blue of plain numeric pins. Joints are sticky handles
+    /// returned by `createDistanceJoint` / `createRevoluteJoint` /
+    /// etc. that the game holds across frames.
+    pub const JointId = core.flow.PinStyle{
+        .label = "Joint",
+        .color = core.flow.Color{ .r = 80, .g = 200, .b = 200, .a = 255 },
+    };
+
+    /// `RayResult` — magenta, marks "physics query result" payloads
+    /// (currently just `rayCast`'s return value) as a distinct shape
+    /// from generic structs. The struct itself must be wired (RFC §2),
+    /// so the color here is purely a visual aid for the wire.
+    pub const RayResult = core.flow.PinStyle{
+        .label = "Ray Result",
+        .color = core.flow.Color{ .r = 198, .g = 100, .b = 196, .a = 255 },
+    };
+};
+
+// ── Flow node impls — game-threading wrappers around the
+//     entity-and-component-facing API above. Kept private; the
+//     `FlowNodes` factory holds them as comptime decls.
+//
+// Each takes `game: anytype` first per RFC §1, then a plain `u32`
+// entity ID (or world-space coordinates for the world-query verbs).
+// The wrapper resolves the entity → `*PhysicsBody` lookup and
+// delegates to the existing low-level helpers (`applyImpulse`,
+// `setVelocity`, …). A missing body component is a silent no-op —
+// flows that lose the body mid-frame shouldn't crash the game.
+
+/// Output struct for the `get_velocity` flow node. Two-component
+/// vector with explicit field names — flow-codegen unpacks the
+/// fields into named output pins so downstream nodes can wire `x`
+/// and `y` independently.
+pub const Vec2Out = struct { x: f32, y: f32 };
+
+fn flowApplyImpulse(game: anytype, entity: u32, ix: f32, iy: f32) void {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        applyImpulse(body, ix, iy);
+    }
+}
+
+fn flowApplyForce(game: anytype, entity: u32, fx: f32, fy: f32) void {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        applyForce(body, fx, fy);
+    }
+}
+
+fn flowApplyTorque(game: anytype, entity: u32, torque: f32) void {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        applyTorque(body, torque);
+    }
+}
+
+fn flowSetVelocity(game: anytype, entity: u32, vx: f32, vy: f32) void {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        setVelocity(body, vx, vy);
+    }
+}
+
+fn flowGetVelocity(game: anytype, entity: u32) Vec2Out {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        const v = getVelocity(body);
+        return .{ .x = v[0], .y = v[1] };
+    }
+    return .{ .x = 0, .y = 0 };
+}
+
+fn flowGetAngularVelocity(game: anytype, entity: u32) f32 {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        return getAngularVelocity(body);
+    }
+    return 0;
+}
+
+fn flowGetPosition(game: anytype, entity: u32) Vec2Out {
+    if (game.ecs_backend.getComponent(entity, Position)) |pos| {
+        return .{ .x = pos.x, .y = pos.y };
+    }
+    return .{ .x = 0, .y = 0 };
+}
+
+fn flowSetPosition(game: anytype, entity: u32, x: f32, y: f32) void {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        setBodyPosition(body, x, y);
+    }
+    // Keep the ECS-side Position in sync for the same frame so
+    // gameplay code that reads it after the flow runs sees the new
+    // value; postTick's syncPositionsBack will overwrite next frame
+    // anyway, but the immediate read is what most flows expect.
+    if (game.ecs_backend.getComponent(entity, Position)) |pos| {
+        pos.x = x;
+        pos.y = y;
+    }
+}
+
+fn flowGetAngle(game: anytype, entity: u32) f32 {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        return getAngle(body);
+    }
+    return 0;
+}
+
+fn flowSetAngle(game: anytype, entity: u32, angle: f32) void {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        setAngle(body, angle);
+    }
+}
+
+fn flowGetMass(game: anytype, entity: u32) f32 {
+    if (game.ecs_backend.getComponent(entity, PhysicsBody)) |body| {
+        return getMass(body);
+    }
+    return 0;
+}
+
+fn flowRayCast(game: anytype, origin_x: f32, origin_y: f32, target_x: f32, target_y: f32) RayResult {
+    _ = game;
+    return rayCast(origin_x, origin_y, target_x, target_y);
+}
+
+/// `body_at` — minimal point query implemented as a short horizontal
+/// ray cast across the queried point. Box2D's proper point-overlap
+/// API (`b2World_OverlapAABB`) requires a C callback + context
+/// pointer; the ray-cast trick is a one-liner that hits any body
+/// wider than 1 pixel and is good enough for the canonical "what did
+/// the player click on?" use case. A dedicated overlap-query wrapper
+/// is a follow-up if a flow author hits the limit.
+fn flowBodyAt(game: anytype, x: f32, y: f32) u32 {
+    _ = game;
+    const result = rayCast(x - 0.5, y, x + 0.5, y);
+    return if (result.hit) result.entity else 0;
+}
+
+fn flowSetGravity(game: anytype, gx: f32, gy: f32) void {
+    _ = game;
+    setGravity(gx, gy);
+}
+
 // Convenience aliases
 pub const GIZMO_COLLISION: u8 = GizmoCategories.Collision;
 pub const GIZMO_PHYSICS: u8 = GizmoCategories.Physics;
@@ -727,3 +992,64 @@ pub fn setGravity(gx: f32, gy: f32) void {
 }
 
 const std = @import("std");
+
+// ══════════════════════════════════════════════════════════════
+// Tests
+// ══════════════════════════════════════════════════════════════
+
+test "FlowNodes block declares the expected verbs" {
+    // Smoke test: every advertised flow node decl exists, carries
+    // the `__is_labelle_flow_node` marker the assembler walks for,
+    // and exposes a non-`void` `impl` decl with `game: anytype` as
+    // its first parameter (RFC-FLOW-VOCABULARY §1).
+    const expected_decls = .{
+        "apply_impulse", "apply_force", "apply_torque",
+        "set_velocity", "get_velocity", "get_angular_velocity",
+        "get_position", "set_position",
+        "get_angle",    "set_angle",
+        "get_mass",
+        "ray_cast",     "body_at",
+        "set_gravity",
+    };
+    inline for (expected_decls) |name| {
+        if (!@hasDecl(FlowNodes, name)) {
+            @compileError("FlowNodes missing expected decl `" ++ name ++ "`");
+        }
+        const node = @field(FlowNodes, name);
+        const Node = @TypeOf(node);
+        if (!@hasDecl(Node, "__is_labelle_flow_node")) {
+            @compileError("FlowNodes." ++ name ++ " is not a FlowNode value");
+        }
+        if (!@hasDecl(Node, "impl")) {
+            @compileError("FlowNodes." ++ name ++ " missing `impl` decl");
+        }
+        const ImplFn = @TypeOf(Node.impl);
+        const fn_info = @typeInfo(ImplFn).@"fn";
+        if (fn_info.params.len < 1) {
+            @compileError("FlowNodes." ++ name ++ "'s impl must take `game: anytype` first");
+        }
+        // First param must be `anytype` — i.e. `params[0].type == null`.
+        if (fn_info.params[0].type != null) {
+            @compileError("FlowNodes." ++ name ++ "'s first impl param must be `game: anytype`");
+        }
+    }
+}
+
+test "PinStyles block declares the expected box2d types" {
+    const expected = .{ "JointId", "RayResult" };
+    inline for (expected) |name| {
+        if (!@hasDecl(PinStyles, name)) {
+            @compileError("PinStyles missing expected decl `" ++ name ++ "`");
+        }
+        const style = @field(PinStyles, name);
+        // Should be a `core.flow.PinStyle` value.
+        if (@TypeOf(style) != core.flow.PinStyle) {
+            @compileError("PinStyles." ++ name ++ " must be a `core.flow.PinStyle` value");
+        }
+        // The whole point of declaring a style is to override
+        // *something*. Make sure at least one display field is set.
+        if (style.label == null and style.color == null and style.icon == null) {
+            @compileError("PinStyles." ++ name ++ " sets no display fields");
+        }
+    }
+}
