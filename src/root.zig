@@ -221,6 +221,13 @@ pub const FlowNodes = struct {
             .target_x = .{ .label = "Target X" },
             .target_y = .{ .label = "Target Y" },
         },
+        // RFC-FLOW-VOCABULARY §1 / O5 — the editor uses this hint to
+        // suggest `ray_cast` from the palette when the user creates a
+        // `SetVariable` on a `RayResult`-typed variable. `RayResult` is
+        // a struct (can't have an inline default widget per §2's
+        // "structs must be wired" rule), so a constructor-node hint is
+        // the discoverability story.
+        .constructs = "labelle_box2d.RayResult",
     });
 
     pub const body_at = core.flow.FlowNode(.{
