@@ -76,6 +76,54 @@ pub const GizmoCategories = struct {
     pub const Sensor: u8 = 3;
 };
 
+// ── Events (auto-discovered by assembler PluginEvents codegen) ──
+//
+// RFC-PLUGIN-EVENTS phase 1 (assembler `602aebd`) folds every plugin
+// module's `pub const Events` into a `PluginEvents` tagged union with
+// variant tag `<plugin>__<event>` (e.g. `box2d__collision_begin`).
+// Phase 2 (this commit) is the matching plugin emit side — see the
+// dual-emit `game.emit(...)` calls in `processContacts` /
+// `processSensorEvents` below. Migration phase 1: the legacy raw
+// `pub var on_collision_*` callback slots stay live alongside the
+// new buffered events for one release.
+//
+// Payload field shapes mirror the v1 callback signatures at
+// `root.zig:90-95` byte-for-byte so a flow consuming the new event
+// gets the same data as a v1 callback subscriber.
+pub const Events = struct {
+    /// Two entities started touching.
+    pub const collision_begin = struct {
+        entity_a: u32,
+        entity_b: u32,
+    };
+    /// Two entities stopped touching.
+    pub const collision_end = struct {
+        entity_a: u32,
+        entity_b: u32,
+    };
+    /// Solver-reported hit event (large impact); carries contact point,
+    /// surface normal, and approach speed.
+    pub const collision_hit = struct {
+        entity_a: u32,
+        entity_b: u32,
+        point_x: f32,
+        point_y: f32,
+        normal_x: f32,
+        normal_y: f32,
+        speed: f32,
+    };
+    /// A visitor entity entered a sensor trigger volume.
+    pub const sensor_enter = struct {
+        sensor_entity: u32,
+        visitor_entity: u32,
+    };
+    /// A visitor entity exited a sensor trigger volume.
+    pub const sensor_exit = struct {
+        sensor_entity: u32,
+        visitor_entity: u32,
+    };
+};
+
 // Convenience aliases
 pub const GIZMO_COLLISION: u8 = GizmoCategories.Collision;
 pub const GIZMO_PHYSICS: u8 = GizmoCategories.Physics;
@@ -510,6 +558,14 @@ fn processContacts(game: anytype) void {
         }
 
         if (on_collision_begin) |cb| cb(entity_a, entity_b);
+        // RFC-PLUGIN-EVENTS phase 2 — dual-emit alongside the legacy slot
+        // (Migration phase 1). The qualified tag `box2d__collision_begin`
+        // is the variant declared by the assembler-generated
+        // `PluginEvents` union from `Events.collision_begin` above.
+        game.emit(.{ .box2d__collision_begin = .{
+            .entity_a = entity_a,
+            .entity_b = entity_b,
+        } });
     }
 
     for (0..@intCast(events.endCount)) |i| {
@@ -520,6 +576,10 @@ fn processContacts(game: anytype) void {
         if (game.ecs_backend.getComponent(entity_a, PhysicsTouching)) |t| t.remove(entity_b);
         if (game.ecs_backend.getComponent(entity_b, PhysicsTouching)) |t| t.remove(entity_a);
         if (on_collision_end) |cb| cb(entity_a, entity_b);
+        game.emit(.{ .box2d__collision_end = .{
+            .entity_a = entity_a,
+            .entity_b = entity_b,
+        } });
     }
 
     for (0..@intCast(events.hitCount)) |i| {
@@ -534,6 +594,15 @@ fn processContacts(game: anytype) void {
         }
 
         if (on_collision_hit) |cb| cb(entity_a, entity_b, event.point.x * ppm, event.point.y * ppm, event.normal.x, event.normal.y, event.approachSpeed);
+        game.emit(.{ .box2d__collision_hit = .{
+            .entity_a = entity_a,
+            .entity_b = entity_b,
+            .point_x = event.point.x * ppm,
+            .point_y = event.point.y * ppm,
+            .normal_x = event.normal.x,
+            .normal_y = event.normal.y,
+            .speed = event.approachSpeed,
+        } });
     }
 }
 
@@ -556,6 +625,10 @@ fn processSensorEvents(game: anytype) void {
         }
 
         if (on_sensor_enter) |cb| cb(sensor_entity, visitor_entity);
+        game.emit(.{ .box2d__sensor_enter = .{
+            .sensor_entity = sensor_entity,
+            .visitor_entity = visitor_entity,
+        } });
     }
 
     for (0..@intCast(events.endCount)) |i| {
@@ -565,6 +638,10 @@ fn processSensorEvents(game: anytype) void {
 
         if (game.ecs_backend.getComponent(sensor_entity, PhysicsSensor)) |s| s.remove(visitor_entity);
         if (on_sensor_exit) |cb| cb(sensor_entity, visitor_entity);
+        game.emit(.{ .box2d__sensor_exit = .{
+            .sensor_entity = sensor_entity,
+            .visitor_entity = visitor_entity,
+        } });
     }
 }
 
