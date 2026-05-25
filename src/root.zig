@@ -82,8 +82,9 @@ pub const GizmoCategories = struct {
 // module's `pub const Events` into a `PluginEvents` tagged union with
 // variant tag `<plugin>__<event>` (e.g. `box2d__collision_begin`).
 // Phase 2 (this commit) is the matching plugin emit side — see the
-// dual-emit `game.emit(...)` calls in `processContacts` /
-// `processSensorEvents` below. Migration phase 1: the legacy raw
+// dual-emit `emitGameEvent(game, "box2d__…", …)` calls in
+// `processContacts` / `processSensorEvents` below. Migration phase 1:
+// the legacy raw
 // `pub var on_collision_*` callback slots stay live alongside the
 // new buffered events for one release.
 //
@@ -416,8 +417,10 @@ pub var show_collision_gizmos: bool = true;
 // `?*const fn(...)` and the plugin would call it from
 // `processContacts` / `processSensorEvents`. RFC-PLUGIN-EVENTS phase 2
 // added `pub const Events` (above) and dual-emits through
-// `game.emit(.{ .box2d__... = ... })` alongside these slots so a v1
-// subscriber kept working through the migration window. Phase 6 (this
+// `emitGameEvent(game, "box2d__...", .{ … })` alongside these slots
+// so a v1 subscriber kept working through the migration window
+// (engine #578 added the comptime-tag gate that helper rides on so
+// projects without merged plugin events build cleanly). Phase 6 (this
 // commit) converted every in-tree flow to the new `name` form
 // (flow-codegen `1182a80` + bouncing-ball `8a3b4c5`); no code path
 // inside the toolkit reads these slots anymore.
@@ -425,7 +428,7 @@ pub var show_collision_gizmos: bool = true;
 // **Removal plan.** A follow-up release drops these `pub var`s and the
 // matching `if (cb) |…| cb(...);` call sites in
 // `processContacts` / `processSensorEvents` below — the dual-emit
-// collapses to a single `game.emit`. New code MUST subscribe via a
+// collapses to a single `emitGameEvent`. New code MUST subscribe via a
 // hook-handler struct on the merged `PluginEvents` union (the same way
 // flow-codegen's new-form `OnEvent` emits the `FlowEventHandler`
 // struct).
@@ -834,6 +837,55 @@ fn syncPositionsBack(game: anytype) void {
     }
 }
 
+/// Tolerant plugin-event emit (mirrors `Game.emitEngineEvent` in
+/// labelle-engine post-#578). The engine's `Game.emit(event)`
+/// requires a concrete `GameEvents` union value, so an anonymous
+/// struct literal like `game.emit(.{ .box2d__sensor_enter = … })`
+/// no longer coerces — it triggers `error: type 'void' does not
+/// support struct initialization syntax` whenever the project's
+/// `GameEvents` is `void` (unit tests, or any project the assembler
+/// hasn't merged box2d's `Events` into yet).
+///
+/// This helper does the same comptime gate `emitEngineEvent` uses:
+/// when the project's `GameEvents` is a union AND declares the
+/// requested variant tag, build the typed payload field-by-field
+/// and forward to `game.emit`. Otherwise the entire body folds to
+/// a no-op — safe for `GameEvents = void` builds, safe for projects
+/// that haven't enabled box2d events, and safe for the standalone
+/// `zig build test` here (which never instantiates `game.emit`
+/// anyway because the test `game` has no `emit` field).
+inline fn emitGameEvent(game: anytype, comptime tag: []const u8, payload: anytype) void {
+    const Game = @TypeOf(game.*);
+    const should_emit = comptime blk: {
+        if (!@hasDecl(Game, "GameEvents")) break :blk false;
+        const GameEvents = Game.GameEvents;
+        const ev_info = @typeInfo(GameEvents);
+        if (ev_info != .@"union") break :blk false;
+        break :blk @hasField(GameEvents, tag);
+    };
+    if (comptime !should_emit) return;
+    const GameEvents = Game.GameEvents;
+    const Payload_t = @FieldType(GameEvents, tag);
+    var typed: Payload_t = undefined;
+    const fields = comptime std.meta.fields(Payload_t);
+    inline for (fields) |f| {
+        if (comptime @hasField(@TypeOf(payload), f.name)) {
+            const src_val = @field(payload, f.name);
+            const SrcT = @TypeOf(src_val);
+            if (comptime @typeInfo(f.type) == .int and @typeInfo(SrcT) == .int) {
+                @field(typed, f.name) = @intCast(src_val);
+            } else {
+                @field(typed, f.name) = src_val;
+            }
+        } else if (comptime f.default_value_ptr != null) {
+            @field(typed, f.name) = @as(*const f.type, @ptrCast(@alignCast(f.default_value_ptr.?))).*;
+        } else {
+            @compileError("emitGameEvent: missing field '" ++ f.name ++ "' for variant '" ++ tag ++ "'");
+        }
+    }
+    game.emit(@unionInit(GameEvents, tag, typed));
+}
+
 fn processContacts(game: anytype) void {
     const events = b2.b2World_GetContactEvents(world_id);
 
@@ -857,11 +909,13 @@ fn processContacts(game: anytype) void {
         // RFC-PLUGIN-EVENTS phase 2 — dual-emit alongside the legacy slot
         // (Migration phase 1). The qualified tag `box2d__collision_begin`
         // is the variant declared by the assembler-generated
-        // `PluginEvents` union from `Events.collision_begin` above.
-        game.emit(.{ .box2d__collision_begin = .{
+        // `PluginEvents` union from `Events.collision_begin` above. Routed
+        // through `emitGameEvent` for the comptime-tag gate engine #578
+        // requires (see helper docs above).
+        emitGameEvent(game, "box2d__collision_begin", .{
             .entity_a = entity_a,
             .entity_b = entity_b,
-        } });
+        });
     }
 
     for (0..@intCast(events.endCount)) |i| {
@@ -872,10 +926,10 @@ fn processContacts(game: anytype) void {
         if (game.ecs_backend.getComponent(entity_a, PhysicsTouching)) |t| t.remove(entity_b);
         if (game.ecs_backend.getComponent(entity_b, PhysicsTouching)) |t| t.remove(entity_a);
         if (on_collision_end) |cb| cb(entity_a, entity_b);
-        game.emit(.{ .box2d__collision_end = .{
+        emitGameEvent(game, "box2d__collision_end", .{
             .entity_a = entity_a,
             .entity_b = entity_b,
-        } });
+        });
     }
 
     for (0..@intCast(events.hitCount)) |i| {
@@ -890,7 +944,7 @@ fn processContacts(game: anytype) void {
         }
 
         if (on_collision_hit) |cb| cb(entity_a, entity_b, event.point.x * ppm, event.point.y * ppm, event.normal.x, event.normal.y, event.approachSpeed);
-        game.emit(.{ .box2d__collision_hit = .{
+        emitGameEvent(game, "box2d__collision_hit", .{
             .entity_a = entity_a,
             .entity_b = entity_b,
             .point_x = event.point.x * ppm,
@@ -898,7 +952,7 @@ fn processContacts(game: anytype) void {
             .normal_x = event.normal.x,
             .normal_y = event.normal.y,
             .speed = event.approachSpeed,
-        } });
+        });
     }
 }
 
@@ -921,10 +975,10 @@ fn processSensorEvents(game: anytype) void {
         }
 
         if (on_sensor_enter) |cb| cb(sensor_entity, visitor_entity);
-        game.emit(.{ .box2d__sensor_enter = .{
+        emitGameEvent(game, "box2d__sensor_enter", .{
             .sensor_entity = sensor_entity,
             .visitor_entity = visitor_entity,
-        } });
+        });
     }
 
     for (0..@intCast(events.endCount)) |i| {
@@ -934,10 +988,10 @@ fn processSensorEvents(game: anytype) void {
 
         if (game.ecs_backend.getComponent(sensor_entity, PhysicsSensor)) |s| s.remove(visitor_entity);
         if (on_sensor_exit) |cb| cb(sensor_entity, visitor_entity);
-        game.emit(.{ .box2d__sensor_exit = .{
+        emitGameEvent(game, "box2d__sensor_exit", .{
             .sensor_entity = sensor_entity,
             .visitor_entity = visitor_entity,
-        } });
+        });
     }
 }
 
