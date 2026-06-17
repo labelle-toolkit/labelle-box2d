@@ -459,7 +459,7 @@ pub const PhysicsBody = struct {
     _synced: bool = false,
 };
 
-pub const ShapeType = enum { box, circle };
+pub const ShapeType = enum { box, circle, diamond };
 
 /// Collider component with collision filtering.
 pub const PhysicsCollider = struct {
@@ -1032,6 +1032,23 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
                 .center = .{ .x = collider.offset_x, .y = collider.offset_y },
                 .radius = collider.radius,
             });
+        },
+        .diamond => {
+            // A 4-vertex diamond (rhombus) from width/height — the natural
+            // footprint for isometric objects. Vertices: top, right, bottom, left.
+            const hw = collider.width / 2;
+            const hh = collider.height / 2;
+            const ox = collider.offset_x;
+            const oy = collider.offset_y;
+            var pts = [_]b2.b2Vec2{
+                .{ .x = ox, .y = oy - hh },
+                .{ .x = ox + hw, .y = oy },
+                .{ .x = ox, .y = oy + hh },
+                .{ .x = ox - hw, .y = oy },
+            };
+            const hull = b2.b2ComputeHull(&pts, 4);
+            const poly = b2.b2MakePolygon(&hull, 0);
+            _ = b2.b2CreatePolygonShape(body_id, &shape_def, &poly);
         },
     }
 }
