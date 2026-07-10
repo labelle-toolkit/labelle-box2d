@@ -76,24 +76,23 @@ if (g.ecs_backend.getComponent(entity, box2d.PhysicsTouching)) |touching| {
 }
 ```
 
-### Callbacks
+### Events
 
-```zig
-pub fn setup(g: anytype) void {
-    box2d.on_collision_begin = onHit;
-    box2d.on_collision_hit = onImpact;
-}
+The plugin emits collision/sensor notifications through the engine's
+`PluginEvents` union (RFC-PLUGIN-EVENTS). Subscribe with a hook-handler
+struct on the merged `PluginEvents` union, or consume them from a flow
+via `OnEvent`:
 
-fn onHit(entity_a: u32, entity_b: u32) void {
-    // contact started
-}
+| Event | Payload |
+|-------|---------|
+| `box2d__collision_begin` | `entity_a: u32, entity_b: u32` |
+| `box2d__collision_end` | `entity_a: u32, entity_b: u32` |
+| `box2d__collision_hit` | `entity_a, entity_b: u32, point_x, point_y, normal_x, normal_y, speed: f32` |
+| `box2d__sensor_enter` | `sensor_entity: u32, visitor_entity: u32` |
+| `box2d__sensor_exit` | `sensor_entity: u32, visitor_entity: u32` |
 
-fn onImpact(a: u32, b: u32, px: f32, py: f32, nx: f32, ny: f32, speed: f32) void {
-    // high-speed impact — speed is approach velocity in m/s
-}
-```
-
-Available callbacks: `on_collision_begin`, `on_collision_end`, `on_collision_hit`, `on_sensor_enter`, `on_sensor_exit`.
+> The legacy `on_collision_*` / `on_sensor_*` raw-slot callbacks were
+> removed in 0.5.0 (RFC-PLUGIN-EVENTS phase 6). Use the events above.
 
 ## Sensors
 

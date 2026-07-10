@@ -7,7 +7,7 @@
 //! Features:
 //!   - RigidBody + Collider components → auto Box2D body creation
 //!   - Touching component (polling collision state)
-//!   - Callbacks: on_collision_begin, on_collision_end, on_collision_hit
+//!   - Collision/sensor events (box2d__collision_begin/end/hit, box2d__sensor_enter/exit)
 //!   - Sensors (trigger volumes)
 //!   - Joints (distance, revolute, prismatic, weld, wheel, mouse)
 //!   - Ray/shape casting
@@ -81,16 +81,12 @@ pub const GizmoCategories = struct {
 // RFC-PLUGIN-EVENTS phase 1 (assembler `602aebd`) folds every plugin
 // module's `pub const Events` into a `PluginEvents` tagged union with
 // variant tag `<plugin>__<event>` (e.g. `box2d__collision_begin`).
-// Phase 2 (this commit) is the matching plugin emit side — see the
-// dual-emit `emitGameEvent(game, "box2d__…", …)` calls in
-// `processContacts` / `processSensorEvents` below. Migration phase 1:
-// the legacy raw
-// `pub var on_collision_*` callback slots stay live alongside the
-// new buffered events for one release.
-//
-// Payload field shapes mirror the v1 callback signatures at
-// `root.zig:90-95` byte-for-byte so a flow consuming the new event
-// gets the same data as a v1 callback subscriber.
+// Phase 2 added the matching plugin emit side — see the
+// `emitGameEvent(game, "box2d__…", …)` calls in
+// `processContacts` / `processSensorEvents` below. These buffered
+// events are the sole notification path: the legacy raw
+// `pub var on_collision_*` / `on_sensor_*` callback slots were removed
+// (RFC-PLUGIN-EVENTS phase 6, box2d#9).
 pub const Events = struct {
     /// Two entities started touching.
     pub const collision_begin = struct {
@@ -406,40 +402,6 @@ pub const GIZMO_SENSOR: u8 = GizmoCategories.Sensor;
 pub var ppm: f32 = 50.0;
 /// Show debug gizmo arrows on collisions.
 pub var show_collision_gizmos: bool = true;
-
-// ── DEPRECATED — raw-slot callbacks ───────────────────────────
-//
-// **DEPRECATED — see RFC-PLUGIN-EVENTS migration. Removed in next
-// release.**
-//
-// The `pub var on_collision_*` / `on_sensor_*` slots below are the v1
-// notification mechanism: a hand-written game would assign a
-// `?*const fn(...)` and the plugin would call it from
-// `processContacts` / `processSensorEvents`. RFC-PLUGIN-EVENTS phase 2
-// added `pub const Events` (above) and dual-emits through
-// `emitGameEvent(game, "box2d__...", .{ … })` alongside these slots
-// so a v1 subscriber kept working through the migration window
-// (engine #578 added the comptime-tag gate that helper rides on so
-// projects without merged plugin events build cleanly). Phase 6 (this
-// commit) converted every in-tree flow to the new `name` form
-// (flow-codegen `1182a80` + bouncing-ball `8a3b4c5`); no code path
-// inside the toolkit reads these slots anymore.
-//
-// **Removal plan.** A follow-up release drops these `pub var`s and the
-// matching `if (cb) |…| cb(...);` call sites in
-// `processContacts` / `processSensorEvents` below — the dual-emit
-// collapses to a single `emitGameEvent`. New code MUST subscribe via a
-// hook-handler struct on the merged `PluginEvents` union (the same way
-// flow-codegen's new-form `OnEvent` emits the `FlowEventHandler`
-// struct).
-
-/// Collision callbacks.
-pub var on_collision_begin: ?*const fn (entity_a: u32, entity_b: u32) void = null;
-pub var on_collision_end: ?*const fn (entity_a: u32, entity_b: u32) void = null;
-pub var on_collision_hit: ?*const fn (entity_a: u32, entity_b: u32, point_x: f32, point_y: f32, normal_x: f32, normal_y: f32, speed: f32) void = null;
-/// Sensor callbacks — trigger volumes.
-pub var on_sensor_enter: ?*const fn (sensor_entity: u32, visitor_entity: u32) void = null;
-pub var on_sensor_exit: ?*const fn (sensor_entity: u32, visitor_entity: u32) void = null;
 
 // ══════════════════════════════════════════════════════════════
 // Components
@@ -905,13 +867,11 @@ fn processContacts(game: anytype) void {
             game.drawGizmoArrowCategory(GIZMO_COLLISION, pa.x * ppm, pa.y * ppm, pb.x * ppm, pb.y * ppm, 0xFF00FF00);
         }
 
-        if (on_collision_begin) |cb| cb(entity_a, entity_b);
-        // RFC-PLUGIN-EVENTS phase 2 — dual-emit alongside the legacy slot
-        // (Migration phase 1). The qualified tag `box2d__collision_begin`
-        // is the variant declared by the assembler-generated
-        // `PluginEvents` union from `Events.collision_begin` above. Routed
-        // through `emitGameEvent` for the comptime-tag gate engine #578
-        // requires (see helper docs above).
+        // The qualified tag `box2d__collision_begin` is the variant
+        // declared by the assembler-generated `PluginEvents` union from
+        // `Events.collision_begin` above. Routed through `emitGameEvent`
+        // for the comptime-tag gate engine #578 requires (see helper docs
+        // above).
         emitGameEvent(game, "box2d__collision_begin", .{
             .entity_a = entity_a,
             .entity_b = entity_b,
@@ -925,7 +885,6 @@ fn processContacts(game: anytype) void {
 
         if (game.ecs_backend.getComponent(entity_a, PhysicsTouching)) |t| t.remove(entity_b);
         if (game.ecs_backend.getComponent(entity_b, PhysicsTouching)) |t| t.remove(entity_a);
-        if (on_collision_end) |cb| cb(entity_a, entity_b);
         emitGameEvent(game, "box2d__collision_end", .{
             .entity_a = entity_a,
             .entity_b = entity_b,
@@ -943,7 +902,6 @@ fn processContacts(game: anytype) void {
             game.drawGizmoArrowCategory(GIZMO_PHYSICS, hx, hy, hx + event.normal.x * event.approachSpeed * 15, hy + event.normal.y * event.approachSpeed * 15, 0xFFFF0000);
         }
 
-        if (on_collision_hit) |cb| cb(entity_a, entity_b, event.point.x * ppm, event.point.y * ppm, event.normal.x, event.normal.y, event.approachSpeed);
         emitGameEvent(game, "box2d__collision_hit", .{
             .entity_a = entity_a,
             .entity_b = entity_b,
@@ -974,7 +932,6 @@ fn processSensorEvents(game: anytype) void {
             game.drawGizmoArrowCategory(GIZMO_SENSOR, sp.x * ppm, sp.y * ppm, vp.x * ppm, vp.y * ppm, 0xFFFFFF00);
         }
 
-        if (on_sensor_enter) |cb| cb(sensor_entity, visitor_entity);
         emitGameEvent(game, "box2d__sensor_enter", .{
             .sensor_entity = sensor_entity,
             .visitor_entity = visitor_entity,
@@ -987,7 +944,6 @@ fn processSensorEvents(game: anytype) void {
         const visitor_entity = entityFromShape(event.visitorShapeId) orelse continue;
 
         if (game.ecs_backend.getComponent(sensor_entity, PhysicsSensor)) |s| s.remove(visitor_entity);
-        if (on_sensor_exit) |cb| cb(sensor_entity, visitor_entity);
         emitGameEvent(game, "box2d__sensor_exit", .{
             .sensor_entity = sensor_entity,
             .visitor_entity = visitor_entity,
