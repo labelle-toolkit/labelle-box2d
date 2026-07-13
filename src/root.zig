@@ -29,6 +29,7 @@ pub const Components = struct {
     pub const Collider = PhysicsCollider;
     pub const Touching = PhysicsTouching;
     pub const Sensor = PhysicsSensor;
+    pub const Control = PhysicsControl;
 };
 
 // ── Systems (auto-dispatched by SystemRegistry) ──
@@ -45,6 +46,7 @@ pub const Systems = struct {
     pub fn tick(game: anytype, dt: f32) void {
         if (!initialized) return;
         syncNewBodies(game);
+        applyControls(game);
         b2.b2World_Step(world_id, dt, 4);
     }
 
@@ -459,6 +461,27 @@ pub const PhysicsBody = struct {
     _synced: bool = false,
 };
 
+/// Script-facing movement intent — a reusable control seam so game logic
+/// in ANY language (Ruby/Lua/TS/…) can drive a body WITHOUT calling into
+/// Box2D directly. A script writes this component each tick through the
+/// ordinary component-set path; `applyControls` reads it before the world
+/// step and translates it into body velocity. Horizontal is
+/// velocity-controlled (crisp platformer feel — no sliding); jump is a
+/// one-shot edge the system consumes so a single-frame write jumps once.
+pub const PhysicsControl = struct {
+    /// Desired horizontal velocity in pixels/s, applied every tick
+    /// (0 = stop). Overrides the body's own horizontal velocity.
+    move_x: f32 = 0,
+    /// Request a jump. The system fires it only when grounded, then sets
+    /// it back to false — so a script can safely set it true for a frame.
+    jump: bool = false,
+    /// Upward velocity (pixels/s) applied on a grounded jump.
+    jump_speed: f32 = 420,
+    /// |vertical velocity| below this (meters/s) counts as "resting" for
+    /// the grounded test (combined with an active contact).
+    ground_eps: f32 = 0.75,
+};
+
 pub const ShapeType = enum { box, circle };
 
 /// Collider component with collision filtering.
@@ -664,6 +687,50 @@ pub fn destroyJoint(joint_id: JointId) void {
 // ══════════════════════════════════════════════════════════════
 // Body operations
 // ══════════════════════════════════════════════════════════════
+
+/// True when the body is resting on a surface: it has at least one active
+/// contact AND its vertical velocity is near zero. Reads the auto-managed
+/// `PhysicsTouching` component (added to every synced body), so no extra
+/// setup is required. Used for the grounded jump gate; also public so
+/// game code can query "can this entity jump?".
+pub fn isGrounded(game: anytype, entity: u32, ground_eps: f32) bool {
+    const body = game.ecs_backend.getComponent(entity, PhysicsBody) orelse return false;
+    if (!body._synced) return false;
+    const has_contact = if (game.ecs_backend.getComponent(entity, PhysicsTouching)) |t|
+        t.count > 0
+    else
+        false;
+    if (!has_contact) return false;
+    const v = b2.b2Body_GetLinearVelocity(body._body_id);
+    return @abs(v.y) < ground_eps;
+}
+
+/// Drive every body that carries a `PhysicsControl` from its script-set
+/// intent, BEFORE the world step so the change integrates this frame.
+/// Horizontal velocity is set directly (crisp control); a requested jump
+/// fires only when grounded and is then consumed.
+fn applyControls(game: anytype) void {
+    var iter = game.ecs_backend.query(.{ PhysicsBody, PhysicsControl });
+    defer iter.deinit(game.ecs_backend.alloc);
+
+    while (iter.next()) |result| {
+        const body: *PhysicsBody = result.comp_0;
+        const ctl: *PhysicsControl = result.comp_1;
+        if (!body._synced) continue;
+
+        const v = getVelocity(body); // pixels/s
+        var vy = v[1];
+
+        if (ctl.jump and isGrounded(game, result.entity, ctl.ground_eps)) {
+            vy = ctl.jump_speed;
+        }
+        // Consume the request every tick: fired above, or dropped because
+        // not grounded — either way a fresh press is needed to jump again.
+        ctl.jump = false;
+
+        setVelocity(body, ctl.move_x, vy);
+    }
+}
 
 /// Apply a force to the body's center of mass (in pixels/s²).
 pub fn applyForce(body: *const PhysicsBody, fx: f32, fy: f32) void {
