@@ -506,16 +506,21 @@ pub const PhysicsCollider = struct {
     segment_x2: f32 = 50,
     /// Segment only: see `segment_x1` (and its static-bodies note).
     segment_y2: f32 = 0,
-    /// Capsule only: spine endpoints relative to the body position,
-    /// pixels. The capsule is the stadium swept by `radius` around the
-    /// segment (x1,y1)→(x2,y2) — the canonical character collider
-    /// (slides over surfaces without catching box corners).
+    /// Capsule only: first spine endpoint's X, pixels relative to
+    /// the body. The capsule is the stadium swept by `radius` around
+    /// the segment (x1,y1)→(x2,y2) — the canonical character collider
+    /// (slides over surfaces without catching box corners). Two
+    /// degenerate cases: COINCIDENT endpoints (zero-length spine)
+    /// silently degrade the shape to a circle — `b2Shape_GetCapsule`
+    /// on it then reads garbage, query with `b2Shape_GetType` first;
+    /// and `radius` must be > 0 (box2d asserts only in debug C builds,
+    /// so the plugin asserts in the attach path).
     capsule_x1: f32 = 0,
-    /// Capsule only: first spine endpoint, pixels.
+    /// Capsule only: first spine endpoint's Y, pixels.
     capsule_y1: f32 = -25,
-    /// Capsule only: second spine endpoint, pixels.
+    /// Capsule only: second spine endpoint's X, pixels.
     capsule_x2: f32 = 0,
-    /// Capsule only: second spine endpoint, pixels.
+    /// Capsule only: second spine endpoint's Y, pixels.
     capsule_y2: f32 = 25,
     /// Collision filtering — category this shape belongs to.
     category_bits: u64 = 0x0001,
@@ -1163,9 +1168,10 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
         },
         .capsule => {
             // Spine endpoints are relative to the body plus the shared
-            // offset (same as every other shape). `anchor` does not
-            // apply: endpoints are explicit geometry, not a bounding
-            // box (same rule as segment).
+            // offset (same as every other shape). `anchor` applies
+            // only to bounding-box shapes, not to explicit endpoint
+            // geometry like this.
+            std.debug.assert(collider.radius > 0);
             const ox = collider.offset_x;
             const oy = collider.offset_y;
             _ = b2.b2CreateCapsuleShape(body_id, &shape_def, &b2.b2Capsule{
