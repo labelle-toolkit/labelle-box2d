@@ -390,17 +390,20 @@ fn flowRayCast(game: anytype, origin_x: f32, origin_y: f32, target_x: f32, targe
     return rayCast(origin_x, origin_y, target_x, target_y);
 }
 
-/// `body_at` — minimal point query implemented as a short horizontal
-/// ray cast across the queried point. Box2D's proper point-overlap
-/// API (`b2World_OverlapAABB`) requires a C callback + context
-/// pointer; the ray-cast trick is a one-liner that hits any body
-/// wider than 1 pixel and is good enough for the canonical "what did
-/// the player click on?" use case. A dedicated overlap-query wrapper
-/// is a follow-up if a flow author hits the limit.
+/// `body_at` — minimal point query implemented as short ray casts
+/// across the queried point. A ray PARALLEL to a segment never hits
+/// it, so one horizontal probe would miss horizontal segment floors
+/// and walls exactly where they matter (codex on #17): probe both
+/// axes — a segment can't be parallel to both, and every other shape
+/// just pays a second cheap miss. Box2D's proper point-overlap API
+/// (`b2World_OverlapAABB`) requires a C callback + context pointer; a
+/// dedicated overlap-query wrapper remains a follow-up.
 fn flowBodyAt(game: anytype, x: f32, y: f32) u32 {
     _ = game;
-    const result = rayCast(x - 0.5, y, x + 0.5, y);
-    return if (result.hit) result.entity else 0;
+    const horizontal = rayCast(x - 0.5, y, x + 0.5, y);
+    if (horizontal.hit) return horizontal.entity;
+    const vertical = rayCast(x, y - 0.5, x, y + 0.5);
+    return if (vertical.hit) vertical.entity else 0;
 }
 
 fn flowSetGravity(game: anytype, gx: f32, gy: f32) void {
@@ -492,12 +495,16 @@ pub const PhysicsCollider = struct {
     /// ColliderAnchor. Only meaningful for box/diamond.
     anchor: ColliderAnchor = .top_left,
     /// Segment only: first endpoint relative to the body position, pixels.
+    /// Segments are effectively for `.body_type = .static` bodies: a
+    /// `b2Segment` has zero area, so it contributes no mass or inertia —
+    /// on a `.dynamic` body box2d falls back to mass=1 with zero
+    /// rotational inertia and `density` is silently ignored.
     segment_x1: f32 = 0,
-    /// Segment only: first endpoint relative to the body position, pixels.
+    /// Segment only: see `segment_x1` (and its static-bodies note).
     segment_y1: f32 = 0,
     /// Segment only: second endpoint relative to the body position, pixels.
     segment_x2: f32 = 50,
-    /// Segment only: second endpoint relative to the body position, pixels.
+    /// Segment only: see `segment_x1` (and its static-bodies note).
     segment_y2: f32 = 0,
     /// Collision filtering — category this shape belongs to.
     category_bits: u64 = 0x0001,
@@ -1128,6 +1135,13 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
             // shared offset (same as every other shape). `anchor` does
             // not apply: endpoints are explicit geometry, not a
             // bounding box.
+            //
+            // TWO-SIDED: a plain `b2Segment` collides from both sides —
+            // a fast body can hit a "platform" from below. One-sided
+            // boundaries and ghost-free junction vertices for chained
+            // terrain are what box2d's CHAIN shape (b2ChainSegment with
+            // ghost vertices) exists for — a chain-shape wrapper is the
+            // deliberate follow-up if a game needs either.
             const ox = collider.offset_x;
             const oy = collider.offset_y;
             _ = b2.b2CreateSegmentShape(body_id, &shape_def, &b2.b2Segment{
