@@ -1251,16 +1251,21 @@ test "emitGameEvent no-ops when the game has no GameEvents decl" {
 const TestWorld = struct {
     world: b2.b2WorldId,
     body: b2.b2BodyId,
+    saved_ppm: f32,
 
     fn create() TestWorld {
         var world_def = b2.b2DefaultWorldDef();
         const world = b2.b2CreateWorld(&world_def);
         var body_def = b2.b2DefaultBodyDef();
         const body = b2.b2CreateBody(world, &body_def);
-        return .{ .world = world, .body = body };
+        return .{ .world = world, .body = body, .saved_ppm = ppm };
     }
 
     fn destroy(self: *TestWorld) void {
+        // Restore the global ppm — the conversion tests pin it to 50
+        // (Copilot review: shared-global leaks make tests order-
+        // dependent), and the live-ppm test mutates it on purpose.
+        ppm = self.saved_ppm;
         b2.b2DestroyWorld(self.world);
     }
 
@@ -1292,6 +1297,7 @@ fn polyExtents(poly: b2.b2Polygon) struct { w: f32, h: f32, cx: f32, cy: f32 } {
 test "attachShape converts box dimensions from pixels to meters" {
     var tw = TestWorld.create();
     defer tw.destroy();
+    ppm = 50;
 
     // 100×50 px box offset by (10, 20) px; at ppm=50 → 2×1 m at (0.2, 0.4) m.
     attachShape(tw.body, &.{
@@ -1312,6 +1318,7 @@ test "attachShape converts box dimensions from pixels to meters" {
 test "attachShape converts circle radius and center from pixels to meters" {
     var tw = TestWorld.create();
     defer tw.destroy();
+    ppm = 50;
 
     // 25 px radius, center offset (5, -10) px → 0.5 m at (0.1, -0.2) m.
     attachShape(tw.body, &.{
@@ -1330,6 +1337,7 @@ test "attachShape converts circle radius and center from pixels to meters" {
 test "attachShape converts diamond dimensions from pixels to meters" {
     var tw = TestWorld.create();
     defer tw.destroy();
+    ppm = 50;
 
     // 80×40 px diamond, no offset → 1.6×0.8 m bounding extents.
     attachShape(tw.body, &.{
@@ -1349,10 +1357,9 @@ test "attachShape conversion follows the live ppm setting" {
     var tw = TestWorld.create();
     defer tw.destroy();
 
-    // A game that re-tunes ppm must get consistently scaled colliders.
-    const saved = ppm;
+    // A game that re-tunes ppm must get consistently scaled colliders
+    // (TestWorld.destroy restores the saved value).
     ppm = 100.0;
-    defer ppm = saved;
 
     attachShape(tw.body, &.{ .shape_type = .circle, .radius = 25 });
 
