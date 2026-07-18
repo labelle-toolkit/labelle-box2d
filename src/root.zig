@@ -90,8 +90,8 @@ pub const GizmoCategories = struct {
 // block by source scan and references these payload types verbatim in
 // the generated union, so they cannot be generic over the game's
 // entity ID type; u32 is the toolkit-wide entity width.
-// (`emitGameEvent` still @intCasts per field, so a future union with
-// a different int width coerces safely at comptime.)
+// (`emitGameEvent` still @intCasts per field: widening coerces
+// losslessly; narrowing is safety-checked at runtime.)
 //
 // **Units.** Contact points are ppm-scaled (screen pixels, matching
 // the Position component); normals are unit vectors; `speed` is
@@ -827,8 +827,9 @@ fn syncPositionsBack(game: anytype) void {
 /// when the project's `GameEvents` is a union AND declares the
 /// requested variant tag, build the typed payload field-by-field
 /// (widening/narrowing ints with @intCast, filling omitted fields
-/// from their declared defaults, failing compile on a missing
-/// required field) and forward to `game.emit`. Otherwise the entire
+/// from their declared defaults, rejecting payload fields the variant
+/// doesn't declare, failing compile on a missing required field)
+/// and forward to `game.emit`. Otherwise the entire
 /// body folds to a no-op — safe for `GameEvents = void` builds and
 /// for projects that haven't enabled box2d events. Both the typed
 /// path and every no-op path are unit-tested below
@@ -846,6 +847,15 @@ inline fn emitGameEvent(game: anytype, comptime tag: []const u8, payload: anytyp
     const GameEvents = Game.GameEvents;
     const Payload_t = @FieldType(GameEvents, tag);
     var typed: Payload_t = undefined;
+    // Reject unknown payload fields up front: the mapping loop below
+    // iterates the *target* variant's fields, so a typo'd payload field
+    // (`.visitor_entiy = …`) would otherwise be silently dropped — and
+    // a defaulted target field would mask the loss entirely.
+    inline for (comptime std.meta.fields(@TypeOf(payload))) |pf| {
+        if (comptime !@hasField(Payload_t, pf.name)) {
+            @compileError("emitGameEvent: unknown payload field '" ++ pf.name ++ "' for variant '" ++ tag ++ "'");
+        }
+    }
     const fields = comptime std.meta.fields(Payload_t);
     inline for (fields) |f| {
         if (comptime @hasField(@TypeOf(payload), f.name)) {
@@ -1110,8 +1120,9 @@ test "PinStyles block declares the expected box2d types" {
 // Synthetic games exercising both branches of the comptime gate:
 // the typed emit (field mapping, @intCast widening, default filling)
 // and every no-op shape (void / non-union GameEvents, missing tag).
-// The remaining branch — @compileError on a missing required field —
-// is a compile-time failure by design and can't be runtime-tested.
+// The @compileError branches — a missing required field and an
+// unknown payload field — are compile-time failures by design and
+// can't be runtime-tested.
 
 /// A game whose GameEvents union declares the emitted tags.
 /// `collision_begin` uses u64 entity fields to prove the @intCast
@@ -1182,52 +1193,36 @@ test "emitGameEvent no-ops when the union lacks the requested tag" {
 }
 
 test "emitGameEvent no-ops for void and non-union GameEvents" {
-    // The primary assertion is that these COMPILE (the emit path is
-    // comptime-eliminated); the `emit` methods stand guard so a gate
-    // regression that somehow reached `game.emit` fails loudly.
+    // Compiling IS the assertion here: if the gate wrongly fired for
+    // these shapes, `@FieldType(void, tag)` / the absent typed-union
+    // path would be a compile error. There is no meaningful runtime
+    // state to observe — the genuinely observable no-op (a missing
+    // tag in a real union) is the test above.
     const VoidGame = struct {
         pub const GameEvents = void;
-        called: bool = false,
-        pub fn emit(self: *@This(), event: anytype) void {
-            _ = event;
-            self.called = true;
-        }
     };
     var void_game = VoidGame{};
     emitGameEvent(&void_game, "box2d__collision_begin", .{
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
-    try std.testing.expect(!void_game.called);
 
     const StructGame = struct {
         pub const GameEvents = struct {};
-        called: bool = false,
-        pub fn emit(self: *@This(), event: anytype) void {
-            _ = event;
-            self.called = true;
-        }
     };
     var struct_game = StructGame{};
     emitGameEvent(&struct_game, "box2d__collision_begin", .{
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
-    try std.testing.expect(!struct_game.called);
 }
 
 test "emitGameEvent no-ops when the game has no GameEvents decl" {
-    const BareGame = struct {
-        called: bool = false,
-        pub fn emit(self: *@This(), event: anytype) void {
-            _ = event;
-            self.called = true;
-        }
-    };
+    // Same contract: compiling is the assertion.
+    const BareGame = struct {};
     var game = BareGame{};
     emitGameEvent(&game, "box2d__collision_begin", .{
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
-    try std.testing.expect(!game.called);
 }
