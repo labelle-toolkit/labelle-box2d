@@ -113,11 +113,13 @@ pub const Events = struct {
     pub const collision_hit = struct {
         entity_a: u32,
         entity_b: u32,
-        /// Contact point, ppm-scaled (screen pixels).
+        /// Contact point X, ppm-scaled (screen pixels).
         point_x: f32,
+        /// Contact point Y, ppm-scaled (screen pixels).
         point_y: f32,
-        /// Surface normal at the contact (unit vector).
+        /// Surface normal X at the contact (unit vector).
         normal_x: f32,
+        /// Surface normal Y at the contact (unit vector).
         normal_y: f32,
         /// Approach speed in box2d units (m/s) — NOT ppm-scaled.
         speed: f32,
@@ -1116,7 +1118,9 @@ test "PinStyles block declares the expected box2d types" {
 /// widening; `sensor_enter` carries a defaulted field the plugin's
 /// payload omits.
 const EmitRecordingGame = struct {
-    const GameEvents = union(enum) {
+    // `pub` on purpose: real games must export GameEvents for
+    // cross-module access — mirror the production contract.
+    pub const GameEvents = union(enum) {
         box2d__collision_begin: struct { entity_a: u64, entity_b: u64 },
         box2d__sensor_enter: struct {
             sensor_entity: u32,
@@ -1178,9 +1182,16 @@ test "emitGameEvent no-ops when the union lacks the requested tag" {
 }
 
 test "emitGameEvent no-ops for void and non-union GameEvents" {
+    // The primary assertion is that these COMPILE (the emit path is
+    // comptime-eliminated); the `emit` methods stand guard so a gate
+    // regression that somehow reached `game.emit` fails loudly.
     const VoidGame = struct {
         pub const GameEvents = void;
         called: bool = false,
+        pub fn emit(self: *@This(), event: anytype) void {
+            _ = event;
+            self.called = true;
+        }
     };
     var void_game = VoidGame{};
     emitGameEvent(&void_game, "box2d__collision_begin", .{
@@ -1192,6 +1203,10 @@ test "emitGameEvent no-ops for void and non-union GameEvents" {
     const StructGame = struct {
         pub const GameEvents = struct {};
         called: bool = false,
+        pub fn emit(self: *@This(), event: anytype) void {
+            _ = event;
+            self.called = true;
+        }
     };
     var struct_game = StructGame{};
     emitGameEvent(&struct_game, "box2d__collision_begin", .{
@@ -1202,7 +1217,13 @@ test "emitGameEvent no-ops for void and non-union GameEvents" {
 }
 
 test "emitGameEvent no-ops when the game has no GameEvents decl" {
-    const BareGame = struct { called: bool = false };
+    const BareGame = struct {
+        called: bool = false,
+        pub fn emit(self: *@This(), event: anytype) void {
+            _ = event;
+            self.called = true;
+        }
+    };
     var game = BareGame{};
     emitGameEvent(&game, "box2d__collision_begin", .{
         .entity_a = @as(u32, 1),
