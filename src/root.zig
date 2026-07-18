@@ -1124,12 +1124,15 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
         },
         .segment => {
             // A line segment collider — terrain edges, walls, one-off
-            // platforms. Endpoints are explicit geometry relative to
-            // the body, so `anchor` does not apply (they are NOT the
-            // shape's bounding box).
+            // platforms. Endpoints are relative to the body plus the
+            // shared offset (same as every other shape). `anchor` does
+            // not apply: endpoints are explicit geometry, not a
+            // bounding box.
+            const ox = collider.offset_x;
+            const oy = collider.offset_y;
             _ = b2.b2CreateSegmentShape(body_id, &shape_def, &b2.b2Segment{
-                .point1 = .{ .x = collider.segment_x1 / ppm, .y = collider.segment_y1 / ppm },
-                .point2 = .{ .x = collider.segment_x2 / ppm, .y = collider.segment_y2 / ppm },
+                .point1 = .{ .x = (collider.segment_x1 + ox) / ppm, .y = (collider.segment_y1 + oy) / ppm },
+                .point2 = .{ .x = (collider.segment_x2 + ox) / ppm, .y = (collider.segment_y2 + oy) / ppm },
             });
         },
     }
