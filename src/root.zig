@@ -6,6 +6,8 @@
 //!
 //! Features:
 //!   - RigidBody + Collider components → auto Box2D body creation
+//!   - Control component (PhysicsControl) — script-driven bodies:
+//!     move_x velocity + grounded-gated one-shot jump, applied pre-step
 //!   - Touching component (polling collision state)
 //!   - Collision/sensor events (box2d__collision_begin/end/hit, box2d__sensor_enter/exit)
 //!   - Sensors (trigger volumes)
@@ -29,6 +31,7 @@ pub const Components = struct {
     pub const Collider = PhysicsCollider;
     pub const Touching = PhysicsTouching;
     pub const Sensor = PhysicsSensor;
+    pub const Control = PhysicsControl;
 };
 
 // ── Systems (auto-dispatched by SystemRegistry) ──
@@ -45,6 +48,7 @@ pub const Systems = struct {
     pub fn tick(game: anytype, dt: f32) void {
         if (!initialized) return;
         syncNewBodies(game);
+        applyControls(game);
         b2.b2World_Step(world_id, dt, 4);
     }
 
@@ -445,6 +449,32 @@ pub const PhysicsBody = struct {
     _anchor_y: f32 = 0,
 };
 
+/// Script-facing movement intent — a reusable control seam so game logic
+/// in ANY language (Ruby/Lua/TS/…) can drive a body WITHOUT calling into
+/// Box2D directly. A script writes this component each tick through the
+/// ordinary component-set path; `applyControls` reads it before the world
+/// step and translates it into body velocity. Horizontal is
+/// velocity-controlled (crisp platformer feel — no sliding); jump is a
+/// one-shot edge the system consumes so a single-frame write jumps once.
+///
+/// **All fields are pixel-space** (pixels/s), like every other public
+/// unit in this plugin — conversion to box2d meters happens at the
+/// `setVelocity`/`getVelocity` boundary.
+pub const PhysicsControl = struct {
+    /// Desired horizontal velocity in pixels/s, applied every tick
+    /// (0 = stop). Overrides the body's own horizontal velocity.
+    move_x: f32 = 0,
+    /// Request a jump. The system fires it only when grounded, then sets
+    /// it back to false — so a script can safely set it true for a frame.
+    jump: bool = false,
+    /// Upward velocity (pixels/s) applied on a grounded jump.
+    jump_speed: f32 = 420,
+    /// |vertical velocity| below this (pixels/s) counts as "resting"
+    /// for the grounded test (combined with an active contact).
+    /// 37.5 px/s = 0.75 m/s at the default ppm of 50.
+    ground_eps: f32 = 37.5,
+};
+
 pub const ShapeType = enum { box, circle, diamond, segment, capsule };
 
 /// How a box/diamond collider is anchored to the entity `Position`.
@@ -714,6 +744,24 @@ pub fn destroyJoint(joint_id: JointId) void {
 // Body operations
 // ══════════════════════════════════════════════════════════════
 
+/// True when the body is resting on a surface: it has at least one active
+/// contact AND its vertical velocity is near zero (`ground_eps`,
+/// pixels/s). Reads the auto-managed `PhysicsTouching` component (added
+/// to every synced body), so no extra setup is required. Used for the
+/// grounded jump gate; also public so game code can query "can this
+/// entity jump?".
+pub fn isGrounded(game: anytype, entity: u32, ground_eps: f32) bool {
+    const body = game.ecs_backend.getComponent(entity, PhysicsBody) orelse return false;
+    if (!body._synced) return false;
+    const has_contact = if (game.ecs_backend.getComponent(entity, PhysicsTouching)) |t|
+        t.count > 0
+    else
+        false;
+    if (!has_contact) return false;
+    const v = getVelocity(body); // pixels/s
+    return @abs(v[1]) < ground_eps;
+}
+
 /// Apply a force to the body's center of mass (in pixels/s²).
 pub fn applyForce(body: *const PhysicsBody, fx: f32, fy: f32) void {
     if (!body._synced) return;
@@ -904,6 +952,36 @@ fn syncNewBodies(game: anytype) void {
                 game.ecs_backend.addComponent(result.entity, PhysicsSensor{});
             }
         }
+    }
+}
+
+/// Drive every body that carries a `PhysicsControl` from its script-set
+/// intent, BEFORE the world step so the change integrates this frame.
+/// Horizontal velocity is set directly (crisp control); a requested jump
+/// fires only when grounded and is then consumed. No ShapeType handling
+/// on purpose: the grounded test is contact-based (`PhysicsTouching`),
+/// so it works identically for box/circle/diamond/segment/capsule
+/// colliders.
+fn applyControls(game: anytype) void {
+    var iter = game.ecs_backend.query(.{ PhysicsBody, PhysicsControl });
+    defer iter.deinit(game.ecs_backend.alloc);
+
+    while (iter.next()) |result| {
+        const body: *PhysicsBody = result.comp_0;
+        const ctl: *PhysicsControl = result.comp_1;
+        if (!body._synced) continue;
+
+        const v = getVelocity(body); // pixels/s
+        var vy = v[1];
+
+        if (ctl.jump and isGrounded(game, result.entity, ctl.ground_eps)) {
+            vy = ctl.jump_speed;
+        }
+        // Consume the request every tick: fired above, or dropped because
+        // not grounded — either way a fresh press is needed to jump again.
+        ctl.jump = false;
+
+        setVelocity(body, ctl.move_x, vy);
     }
 }
 
@@ -1401,6 +1479,16 @@ const TestWorld = struct {
         b2.b2DestroyWorld(self.world);
     }
 
+    /// A DYNAMIC body in the same world — box2d silently ignores
+    /// `b2Body_SetLinearVelocity` on static bodies (the default
+    /// `self.body`), so velocity-observing tests need this one.
+    /// Destroyed with the world.
+    fn dynamicBody(self: *const TestWorld) b2.b2BodyId {
+        var body_def = b2.b2DefaultBodyDef();
+        body_def.type = b2.b2_dynamicBody;
+        return b2.b2CreateBody(self.world, &body_def);
+    }
+
     fn onlyShape(self: *const TestWorld) !b2.b2ShapeId {
         var shapes: [1]b2.b2ShapeId = undefined;
         // A real test failure, not an assert: in a release-mode test
@@ -1638,6 +1726,181 @@ test "attachShape converts capsule spine and radius from pixels to meters (#2)" 
     try std.testing.expectApproxEqAbs(@as(f32, 0.2), cap.center1.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.2), cap.center2.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), cap.radius, 0.001);
+}
+
+// ── PhysicsControl seam (#19) ──
+//
+// A minimal one-entity fake game: enough `ecs_backend` surface
+// (getComponent + query + alloc) for `applyControls`/`isGrounded` to
+// run against a REAL box2d body (via TestWorld), without a full engine.
+
+const ControlHarness = struct {
+    body: PhysicsBody = .{},
+    control: PhysicsControl = .{},
+    touching: PhysicsTouching = .{},
+    ecs_backend: Backend = .{},
+
+    /// Wire the backend's back-pointer. Must be called after the
+    /// harness has its final address.
+    fn wire(self: *ControlHarness) void {
+        self.ecs_backend.harness = self;
+    }
+
+    const Backend = struct {
+        harness: ?*ControlHarness = null,
+        alloc: std.mem.Allocator = std.testing.allocator,
+
+        pub fn getComponent(self: *const Backend, entity: u32, comptime T: type) ?*T {
+            _ = entity;
+            const h = self.harness.?;
+            if (T == PhysicsBody) return &h.body;
+            if (T == PhysicsControl) return &h.control;
+            if (T == PhysicsTouching) return &h.touching;
+            return null;
+        }
+
+        pub fn query(self: *const Backend, comptime spec: anytype) Iter {
+            comptime std.debug.assert(spec.len == 2);
+            return .{ .harness = self.harness.? };
+        }
+    };
+
+    const Iter = struct {
+        harness: *ControlHarness,
+        done: bool = false,
+
+        const Result = struct { entity: u32, comp_0: *PhysicsBody, comp_1: *PhysicsControl };
+
+        pub fn next(self: *Iter) ?Result {
+            if (self.done) return null;
+            self.done = true;
+            return .{ .entity = 1, .comp_0 = &self.harness.body, .comp_1 = &self.harness.control };
+        }
+
+        pub fn deinit(self: *Iter, alloc: std.mem.Allocator) void {
+            _ = self;
+            _ = alloc;
+        }
+    };
+};
+
+test "Components exports Control as an alias of PhysicsControl" {
+    try std.testing.expect(Components.Control == PhysicsControl);
+}
+
+test "PhysicsControl defaults are pixel-space" {
+    const ctl = PhysicsControl{};
+    try std.testing.expectEqual(@as(f32, 0), ctl.move_x);
+    try std.testing.expect(!ctl.jump);
+    try std.testing.expectEqual(@as(f32, 420), ctl.jump_speed);
+    // 37.5 px/s == the original seam's 0.75 m/s at ppm 50 — the field
+    // moved to pixel units in the 0.5.0-convention port.
+    try std.testing.expectEqual(@as(f32, 37.5), ctl.ground_eps);
+}
+
+test "applyControls fires a grounded jump and consumes the request" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+    ppm = 50;
+
+    var h = ControlHarness{};
+    h.wire();
+    h.body = .{ ._body_id = tw.dynamicBody(), ._synced = true };
+    h.touching.add(2); // active contact; new body has vy = 0 → grounded
+    h.control = .{ .move_x = 120, .jump = true };
+
+    applyControls(&h);
+
+    const v = getVelocity(&h.body);
+    try std.testing.expectApproxEqAbs(@as(f32, 120), v[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 420), v[1], 0.001);
+    try std.testing.expect(!h.control.jump); // consumed by firing
+}
+
+test "applyControls consumes an airborne jump without firing it" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+    ppm = 50;
+
+    var h = ControlHarness{};
+    h.wire();
+    h.body = .{ ._body_id = tw.dynamicBody(), ._synced = true };
+    // No contact → not grounded, whatever the velocity.
+    h.control = .{ .move_x = -80, .jump = true };
+
+    applyControls(&h);
+
+    const v = getVelocity(&h.body);
+    try std.testing.expectApproxEqAbs(@as(f32, -80), v[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), v[1], 0.001); // no jump
+    try std.testing.expect(!h.control.jump); // consumed anyway
+}
+
+test "applyControls overrides horizontal velocity but preserves vertical" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+    ppm = 50;
+
+    var h = ControlHarness{};
+    h.wire();
+    h.body = .{ ._body_id = tw.dynamicBody(), ._synced = true };
+    setVelocity(&h.body, 999, -250); // mid-fall, drifting
+    h.control = .{ .move_x = 60 };
+
+    applyControls(&h);
+
+    const v = getVelocity(&h.body);
+    try std.testing.expectApproxEqAbs(@as(f32, 60), v[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -250), v[1], 0.001);
+}
+
+test "applyControls skips unsynced bodies and leaves the jump pending" {
+    var h = ControlHarness{};
+    h.wire();
+    // Default body: _synced = false, zeroed body id — must not be touched.
+    h.control = .{ .move_x = 100, .jump = true };
+
+    applyControls(&h);
+
+    // The intent stays queued for the tick where the body syncs.
+    try std.testing.expect(h.control.jump);
+    try std.testing.expectEqual(@as(f32, 100), h.control.move_x);
+}
+
+test "isGrounded requires an active contact AND near-zero vertical speed" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+    ppm = 50;
+
+    var h = ControlHarness{};
+    h.wire();
+    h.body = .{ ._body_id = tw.dynamicBody(), ._synced = true };
+
+    // Contact + resting → grounded.
+    h.touching.add(2);
+    try std.testing.expect(isGrounded(&h, 1, 37.5));
+
+    // Contact but rising fast → airborne (walking off vs. jumping up).
+    setVelocity(&h.body, 0, 300);
+    try std.testing.expect(!isGrounded(&h, 1, 37.5));
+
+    // ground_eps is pixels/s: 80 px/s sits inside a 100 px/s window,
+    // outside a 50 px/s one.
+    setVelocity(&h.body, 0, 80);
+    try std.testing.expect(isGrounded(&h, 1, 100));
+    try std.testing.expect(!isGrounded(&h, 1, 50));
+
+    // No contact → never grounded, even at rest.
+    setVelocity(&h.body, 0, 0);
+    h.touching.remove(2);
+    try std.testing.expect(!isGrounded(&h, 1, 37.5));
+}
+
+test "isGrounded is false for unsynced bodies" {
+    var h = ControlHarness{};
+    h.wire();
+    h.touching.add(2);
+    try std.testing.expect(!isGrounded(&h, 1, 37.5));
 }
 
 test "attachShape: coincident capsule endpoints silently degrade to a circle (#18)" {

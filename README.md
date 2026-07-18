@@ -61,8 +61,32 @@ No script needed for physics — the plugin's `Systems` handle everything automa
 | `Collider` | Shape, size, density, friction, restitution, filtering |
 | `Touching` | Auto-populated: entities currently in contact |
 | `Sensor` | Auto-populated: entities inside a trigger volume |
+| `Control` | Script-facing movement intent: `move_x` velocity + grounded one-shot `jump` |
 
 All components are auto-discovered by the engine's `ComponentRegistryWithPlugins`.
+
+### Script-driven bodies (Control)
+
+`Control` (`PhysicsControl`) is the seam for driving a body from game
+logic in ANY language (Ruby/Lua/TS/…) without calling into Box2D
+directly: write the component each tick (e.g. via the scripting
+`component_set` path) and the physics tick translates it into body
+velocity before the world step.
+
+```ruby
+# e.g. from a Ruby script — the only entity with Control is the player
+player.set("Control", move_x: 240.0, jump: pressed_jump)
+```
+
+- `move_x` (pixels/s) is applied as the body's horizontal velocity every
+  tick — crisp platformer control, no sliding; vertical velocity is left
+  to gravity.
+- `jump` is a one-shot edge: it fires only when the body is grounded
+  (active `Touching` contact AND `|vy| < ground_eps`) and is consumed by
+  the system either way, so a single-frame `true` jumps at most once.
+- `jump_speed` / `ground_eps` are pixels/s like every other unit.
+
+The grounded test is also public: `box2d.isGrounded(game, entity, eps)`.
 
 ### Units & anchoring
 
