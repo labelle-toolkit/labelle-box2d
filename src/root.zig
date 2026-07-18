@@ -1264,9 +1264,12 @@ const TestWorld = struct {
         b2.b2DestroyWorld(self.world);
     }
 
-    fn onlyShape(self: *const TestWorld) b2.b2ShapeId {
+    fn onlyShape(self: *const TestWorld) !b2.b2ShapeId {
         var shapes: [1]b2.b2ShapeId = undefined;
-        std.debug.assert(b2.b2Body_GetShapes(self.body, &shapes, 1) == 1);
+        // A real test failure, not an assert: in a release-mode test
+        // run std.debug.assert compiles out and a missing shape would
+        // leave the geometry expectations reading undefined memory.
+        try std.testing.expectEqual(@as(c_int, 1), b2.b2Body_GetShapes(self.body, &shapes, 1));
         return shapes[0];
     }
 };
@@ -1299,7 +1302,7 @@ test "attachShape converts box dimensions from pixels to meters" {
         .offset_y = 20,
     });
 
-    const ext = polyExtents(b2.b2Shape_GetPolygon(tw.onlyShape()));
+    const ext = polyExtents(b2.b2Shape_GetPolygon(try tw.onlyShape()));
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), ext.w, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), ext.h, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.2), ext.cx, 0.001);
@@ -1318,7 +1321,7 @@ test "attachShape converts circle radius and center from pixels to meters" {
         .offset_y = -10,
     });
 
-    const circle = b2.b2Shape_GetCircle(tw.onlyShape());
+    const circle = b2.b2Shape_GetCircle(try tw.onlyShape());
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), circle.radius, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), circle.center.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, -0.2), circle.center.y, 0.001);
@@ -1335,7 +1338,7 @@ test "attachShape converts diamond dimensions from pixels to meters" {
         .height = 40,
     });
 
-    const ext = polyExtents(b2.b2Shape_GetPolygon(tw.onlyShape()));
+    const ext = polyExtents(b2.b2Shape_GetPolygon(try tw.onlyShape()));
     try std.testing.expectApproxEqAbs(@as(f32, 1.6), ext.w, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.8), ext.h, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), ext.cx, 0.001);
@@ -1353,6 +1356,6 @@ test "attachShape conversion follows the live ppm setting" {
 
     attachShape(tw.body, &.{ .shape_type = .circle, .radius = 25 });
 
-    const circle = b2.b2Shape_GetCircle(tw.onlyShape());
+    const circle = b2.b2Shape_GetCircle(try tw.onlyShape());
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), circle.radius, 0.001);
 }
