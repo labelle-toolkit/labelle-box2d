@@ -78,15 +78,26 @@ pub const GizmoCategories = struct {
 
 // ── Events (auto-discovered by assembler PluginEvents codegen) ──
 //
-// RFC-PLUGIN-EVENTS phase 1 (assembler `602aebd`) folds every plugin
-// module's `pub const Events` into a `PluginEvents` tagged union with
-// variant tag `<plugin>__<event>` (e.g. `box2d__collision_begin`).
-// Phase 2 added the matching plugin emit side — see the
-// `emitGameEvent(game, "box2d__…", …)` calls in
-// `processContacts` / `processSensorEvents` below. These buffered
-// events are the sole notification path: the legacy raw
-// `pub var on_collision_*` / `on_sensor_*` callback slots were removed
-// (RFC-PLUGIN-EVENTS phase 6, box2d#9).
+// The assembler scans each plugin module for `pub const Events` and
+// folds every `pub const <name> = struct` inside it into a
+// `PluginEvents` tagged union with variant tag `<plugin>__<event>`
+// (e.g. `box2d__collision_begin`). These buffered events — emitted via
+// `emitGameEvent(game, "box2d__…", …)` in `processContacts` /
+// `processSensorEvents` below — are the plugin's sole notification
+// path (the legacy raw callback slots were removed in box2d#9).
+//
+// **Entity IDs are u32 by contract.** The assembler discovers this
+// block by source scan and references these payload types verbatim in
+// the generated union, so they cannot be generic over the game's
+// entity ID type; u32 is the toolkit-wide entity width.
+// (`emitGameEvent` still @intCasts per field, so a future union with
+// a different int width coerces safely at comptime.)
+//
+// **Units.** Contact points are ppm-scaled (screen pixels, matching
+// the Position component); normals are unit vectors; `speed` is
+// box2d's raw approach speed in m/s — NOT ppm-scaled. The mix is
+// inherited from the removed v1 callback signatures and kept for
+// schema stability; read the field docs before doing math with it.
 pub const Events = struct {
     /// Two entities started touching.
     pub const collision_begin = struct {
@@ -98,15 +109,17 @@ pub const Events = struct {
         entity_a: u32,
         entity_b: u32,
     };
-    /// Solver-reported hit event (large impact); carries contact point,
-    /// surface normal, and approach speed.
+    /// Solver-reported hit event (large impact).
     pub const collision_hit = struct {
         entity_a: u32,
         entity_b: u32,
+        /// Contact point, ppm-scaled (screen pixels).
         point_x: f32,
         point_y: f32,
+        /// Surface normal at the contact (unit vector).
         normal_x: f32,
         normal_y: f32,
+        /// Approach speed in box2d units (m/s) — NOT ppm-scaled.
         speed: f32,
     };
     /// A visitor entity entered a sensor trigger volume.
@@ -811,11 +824,13 @@ fn syncPositionsBack(game: anytype) void {
 /// This helper does the same comptime gate `emitEngineEvent` uses:
 /// when the project's `GameEvents` is a union AND declares the
 /// requested variant tag, build the typed payload field-by-field
-/// and forward to `game.emit`. Otherwise the entire body folds to
-/// a no-op — safe for `GameEvents = void` builds, safe for projects
-/// that haven't enabled box2d events, and safe for the standalone
-/// `zig build test` here (which never instantiates `game.emit`
-/// anyway because the test `game` has no `emit` field).
+/// (widening/narrowing ints with @intCast, filling omitted fields
+/// from their declared defaults, failing compile on a missing
+/// required field) and forward to `game.emit`. Otherwise the entire
+/// body folds to a no-op — safe for `GameEvents = void` builds and
+/// for projects that haven't enabled box2d events. Both the typed
+/// path and every no-op path are unit-tested below
+/// ("emitGameEvent …" tests).
 inline fn emitGameEvent(game: anytype, comptime tag: []const u8, payload: anytype) void {
     const Game = @TypeOf(game.*);
     const should_emit = comptime blk: {
@@ -1086,4 +1101,112 @@ test "PinStyles block declares the expected box2d types" {
             @compileError("PinStyles." ++ name ++ " sets no display fields");
         }
     }
+}
+
+// ── emitGameEvent tests ──
+//
+// Synthetic games exercising both branches of the comptime gate:
+// the typed emit (field mapping, @intCast widening, default filling)
+// and every no-op shape (void / non-union GameEvents, missing tag).
+// The remaining branch — @compileError on a missing required field —
+// is a compile-time failure by design and can't be runtime-tested.
+
+/// A game whose GameEvents union declares the emitted tags.
+/// `collision_begin` uses u64 entity fields to prove the @intCast
+/// widening; `sensor_enter` carries a defaulted field the plugin's
+/// payload omits.
+const EmitRecordingGame = struct {
+    const GameEvents = union(enum) {
+        box2d__collision_begin: struct { entity_a: u64, entity_b: u64 },
+        box2d__sensor_enter: struct {
+            sensor_entity: u32,
+            visitor_entity: u32,
+            extra: f32 = 99.5,
+        },
+    };
+
+    last: ?GameEvents = null,
+    count: usize = 0,
+
+    pub fn emit(self: *@This(), event: GameEvents) void {
+        self.last = event;
+        self.count += 1;
+    }
+};
+
+test "emitGameEvent builds the typed payload and widens int fields" {
+    var game = EmitRecordingGame{};
+    emitGameEvent(&game, "box2d__collision_begin", .{
+        .entity_a = @as(u32, 7),
+        .entity_b = @as(u32, 42),
+    });
+    try std.testing.expectEqual(@as(usize, 1), game.count);
+    switch (game.last.?) {
+        .box2d__collision_begin => |p| {
+            try std.testing.expectEqual(@as(u64, 7), p.entity_a);
+            try std.testing.expectEqual(@as(u64, 42), p.entity_b);
+        },
+        else => return error.TestExpectedCollisionBegin,
+    }
+}
+
+test "emitGameEvent fills omitted fields from their declared defaults" {
+    var game = EmitRecordingGame{};
+    emitGameEvent(&game, "box2d__sensor_enter", .{
+        .sensor_entity = @as(u32, 3),
+        .visitor_entity = @as(u32, 9),
+    });
+    try std.testing.expectEqual(@as(usize, 1), game.count);
+    switch (game.last.?) {
+        .box2d__sensor_enter => |p| {
+            try std.testing.expectEqual(@as(u32, 3), p.sensor_entity);
+            try std.testing.expectEqual(@as(u32, 9), p.visitor_entity);
+            try std.testing.expectEqual(@as(f32, 99.5), p.extra);
+        },
+        else => return error.TestExpectedSensorEnter,
+    }
+}
+
+test "emitGameEvent no-ops when the union lacks the requested tag" {
+    var game = EmitRecordingGame{};
+    emitGameEvent(&game, "box2d__collision_end", .{
+        .entity_a = @as(u32, 1),
+        .entity_b = @as(u32, 2),
+    });
+    try std.testing.expectEqual(@as(usize, 0), game.count);
+    try std.testing.expect(game.last == null);
+}
+
+test "emitGameEvent no-ops for void and non-union GameEvents" {
+    const VoidGame = struct {
+        pub const GameEvents = void;
+        called: bool = false,
+    };
+    var void_game = VoidGame{};
+    emitGameEvent(&void_game, "box2d__collision_begin", .{
+        .entity_a = @as(u32, 1),
+        .entity_b = @as(u32, 2),
+    });
+    try std.testing.expect(!void_game.called);
+
+    const StructGame = struct {
+        pub const GameEvents = struct {};
+        called: bool = false,
+    };
+    var struct_game = StructGame{};
+    emitGameEvent(&struct_game, "box2d__collision_begin", .{
+        .entity_a = @as(u32, 1),
+        .entity_b = @as(u32, 2),
+    });
+    try std.testing.expect(!struct_game.called);
+}
+
+test "emitGameEvent no-ops when the game has no GameEvents decl" {
+    const BareGame = struct { called: bool = false };
+    var game = BareGame{};
+    emitGameEvent(&game, "box2d__collision_begin", .{
+        .entity_a = @as(u32, 1),
+        .entity_b = @as(u32, 2),
+    });
+    try std.testing.expect(!game.called);
 }
