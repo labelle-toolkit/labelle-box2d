@@ -65,6 +65,37 @@ No script needed for physics — the plugin's `Systems` handle everything automa
 
 All components are auto-discovered by the engine's `ComponentRegistryWithPlugins`.
 
+### Shapes
+
+`shape_type` selects one of five shapes; each reads its own `Collider` fields (all pixels, all relative to the body position):
+
+| Shape | Fields | Notes |
+|-------|--------|-------|
+| `.box` | `width`, `height` | Anchored per `anchor` (top-left by default, see below) |
+| `.diamond` | `width`, `height` | Rotated-square polygon; anchors like `.box` |
+| `.circle` | `radius` | Always centre-anchored |
+| `.segment` | `segment_x1`, `segment_y1`, `segment_x2`, `segment_y2` | Line between two endpoints; **two-sided** (collides from both sides). Effectively for `.static` bodies — a segment has zero area, so on a dynamic body box2d falls back to mass=1 with no rotational inertia and `density` is ignored |
+| `.capsule` | `capsule_x1`, `capsule_y1`, `capsule_x2`, `capsule_y2`, `radius` | Stadium swept by `radius` around the spine `(capsule_x1, capsule_y1) → (capsule_x2, capsule_y2)` — the canonical character collider (slides over surfaces without catching box corners). `radius` must be > 0; coincident endpoints silently degrade to a circle |
+
+```zig
+// One-way-looking floor (physics is still two-sided)
+g.ecs_backend.addComponent(floor, box2d.PhysicsCollider{
+    .shape_type = .segment,
+    .segment_x1 = -400, .segment_y1 = 0,
+    .segment_x2 = 400,  .segment_y2 = 0,
+});
+
+// Character capsule: vertical spine, 50px tall + 2×15px caps
+g.ecs_backend.addComponent(player, box2d.PhysicsCollider{
+    .shape_type = .capsule,
+    .capsule_x1 = 0, .capsule_y1 = -25,
+    .capsule_x2 = 0, .capsule_y2 = 25,
+    .radius = 15,
+});
+```
+
+Segment/capsule geometry is authored relative to the body position, so the box/diamond `anchor` setting does not apply to them — but the shared `offset_x`/`offset_y` fields still do: the runtime adds them to every endpoint before conversion.
+
 ### Script-driven bodies (Control)
 
 `Control` (`PhysicsControl`) is the seam for driving a body from game
