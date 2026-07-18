@@ -390,17 +390,20 @@ fn flowRayCast(game: anytype, origin_x: f32, origin_y: f32, target_x: f32, targe
     return rayCast(origin_x, origin_y, target_x, target_y);
 }
 
-/// `body_at` — minimal point query implemented as a short horizontal
-/// ray cast across the queried point. Box2D's proper point-overlap
-/// API (`b2World_OverlapAABB`) requires a C callback + context
-/// pointer; the ray-cast trick is a one-liner that hits any body
-/// wider than 1 pixel and is good enough for the canonical "what did
-/// the player click on?" use case. A dedicated overlap-query wrapper
-/// is a follow-up if a flow author hits the limit.
+/// `body_at` — minimal point query implemented as short ray casts
+/// across the queried point. A ray PARALLEL to a segment never hits
+/// it, so one horizontal probe would miss horizontal segment floors
+/// and walls exactly where they matter (codex on #17): probe both
+/// axes — a segment can't be parallel to both, and every other shape
+/// just pays a second cheap miss. Box2D's proper point-overlap API
+/// (`b2World_OverlapAABB`) requires a C callback + context pointer; a
+/// dedicated overlap-query wrapper remains a follow-up.
 fn flowBodyAt(game: anytype, x: f32, y: f32) u32 {
     _ = game;
-    const result = rayCast(x - 0.5, y, x + 0.5, y);
-    return if (result.hit) result.entity else 0;
+    const horizontal = rayCast(x - 0.5, y, x + 0.5, y);
+    if (horizontal.hit) return horizontal.entity;
+    const vertical = rayCast(x, y - 0.5, x, y + 0.5);
+    return if (vertical.hit) vertical.entity else 0;
 }
 
 fn flowSetGravity(game: anytype, gx: f32, gy: f32) void {
@@ -442,7 +445,7 @@ pub const PhysicsBody = struct {
     _anchor_y: f32 = 0,
 };
 
-pub const ShapeType = enum { box, circle, diamond };
+pub const ShapeType = enum { box, circle, diamond, segment };
 
 /// How a box/diamond collider is anchored to the entity `Position`.
 ///   top_left (default) — `Position` is the shape's top edge / left
@@ -491,6 +494,18 @@ pub const PhysicsCollider = struct {
     /// Anchor of the entity Position relative to the shape — see
     /// ColliderAnchor. Only meaningful for box/diamond.
     anchor: ColliderAnchor = .top_left,
+    /// Segment only: first endpoint relative to the body position, pixels.
+    /// Segments are effectively for `.body_type = .static` bodies: a
+    /// `b2Segment` has zero area, so it contributes no mass or inertia —
+    /// on a `.dynamic` body box2d falls back to mass=1 with zero
+    /// rotational inertia and `density` is silently ignored.
+    segment_x1: f32 = 0,
+    /// Segment only: see `segment_x1` (and its static-bodies note).
+    segment_y1: f32 = 0,
+    /// Segment only: second endpoint relative to the body position, pixels.
+    segment_x2: f32 = 50,
+    /// Segment only: see `segment_x1` (and its static-bodies note).
+    segment_y2: f32 = 0,
     /// Collision filtering — category this shape belongs to.
     category_bits: u64 = 0x0001,
     /// Collision filtering — categories this shape collides with.
@@ -811,7 +826,9 @@ fn anchorOffsetPx(collider: ?*const PhysicsCollider) struct { x: f32, y: f32 } {
     // are unused, so the box expression would offset them by the
     // meaningless defaults.
     return switch (c.shape_type) {
-        .circle => .{ .x = 0, .y = 0 },
+        // Explicit-geometry shapes (segment endpoints are authored
+        // relative to the body) and circles anchor at the centre.
+        .circle, .segment => .{ .x = 0, .y = 0 },
         // World space is y-up: the gfx rectangle renders from the
         // TOP edge of `Position` downward (screen-space top-left maps
         // to world y ∈ [P.y − h, P.y]), so its centre is
@@ -1111,6 +1128,26 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
             const hull = b2.b2ComputeHull(&pts, 4);
             const poly = b2.b2MakePolygon(&hull, 0);
             _ = b2.b2CreatePolygonShape(body_id, &shape_def, &poly);
+        },
+        .segment => {
+            // A line segment collider — terrain edges, walls, one-off
+            // platforms. Endpoints are relative to the body plus the
+            // shared offset (same as every other shape). `anchor` does
+            // not apply: endpoints are explicit geometry, not a
+            // bounding box.
+            //
+            // TWO-SIDED: a plain `b2Segment` collides from both sides —
+            // a fast body can hit a "platform" from below. One-sided
+            // boundaries and ghost-free junction vertices for chained
+            // terrain are what box2d's CHAIN shape (b2ChainSegment with
+            // ghost vertices) exists for — a chain-shape wrapper is the
+            // deliberate follow-up if a game needs either.
+            const ox = collider.offset_x;
+            const oy = collider.offset_y;
+            _ = b2.b2CreateSegmentShape(body_id, &shape_def, &b2.b2Segment{
+                .point1 = .{ .x = (collider.segment_x1 + ox) / ppm, .y = (collider.segment_y1 + oy) / ppm },
+                .point2 = .{ .x = (collider.segment_x2 + ox) / ppm, .y = (collider.segment_y2 + oy) / ppm },
+            });
         },
     }
 }
@@ -1454,6 +1491,12 @@ test "anchorOffsetPx: circle never offsets, whatever the anchor" {
     try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&circle_col).x);
 }
 
+test "anchorOffsetPx: segment endpoints are explicit geometry — never offset" {
+    const seg_col: PhysicsCollider = .{ .shape_type = .segment, .width = 100, .height = 40 };
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&seg_col).x);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&seg_col).y);
+}
+
 test "anchorOffsetPx: center anchor and missing collider never offset" {
     const centered: PhysicsCollider = .{ .shape_type = .box, .width = 100, .height = 40, .anchor = .center };
     try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&centered).x);
@@ -1481,4 +1524,29 @@ test "setBodyPosition applies the cached anchor offset" {
     const p = b2.b2Body_GetPosition(tw.body);
     try std.testing.expectApproxEqAbs(@as(f32, 5.0), p.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), p.y, 0.001);
+}
+
+test "attachShape converts segment endpoints from pixels to meters (#1)" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+    ppm = 50;
+
+    // (0, 25) → (150, 25) px wall, offset (10, -5) px; at ppm=50 →
+    // (0.2, 0.4) → (3.2, 0.4) m. The shared offset applies to segment
+    // endpoints like every other shape.
+    attachShape(tw.body, &.{
+        .shape_type = .segment,
+        .segment_x1 = 0,
+        .segment_y1 = 25,
+        .segment_x2 = 150,
+        .segment_y2 = 25,
+        .offset_x = 10,
+        .offset_y = -5,
+    });
+
+    const seg = b2.b2Shape_GetSegment(try tw.onlyShape());
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), seg.point1.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), seg.point1.y, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.2), seg.point2.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), seg.point2.y, 0.001);
 }
