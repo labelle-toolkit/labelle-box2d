@@ -439,16 +439,28 @@ pub const PhysicsBody = struct {
 pub const ShapeType = enum { box, circle, diamond };
 
 /// Collider component with collision filtering.
+///
+/// **Dimensions are in PIXELS** (matching `Position`, visual `Shape`,
+/// and the rest of the API's force/velocity/joint units) — the plugin
+/// converts to box2d meters with `ppm` when shapes are attached.
+/// Author a 15px visual circle as `.radius = 15`, never `0.3`.
+/// (Pre-0.5.0 these fields were raw box2d meters — see migration
+/// note in the 0.5.0 release notes.)
 pub const PhysicsCollider = struct {
     shape_type: ShapeType = .box,
-    width: f32 = 1.0,
-    height: f32 = 1.0,
-    radius: f32 = 0.5,
+    /// Box/diamond full width, pixels.
+    width: f32 = 50.0,
+    /// Box/diamond full height, pixels.
+    height: f32 = 50.0,
+    /// Circle radius, pixels.
+    radius: f32 = 25.0,
     density: f32 = 1.0,
     friction: f32 = 0.3,
     restitution: f32 = 0.0,
     is_sensor: bool = false,
+    /// Shape offset from the body position, pixels.
     offset_x: f32 = 0,
+    /// Shape offset from the body position, pixels.
     offset_y: f32 = 0,
     /// Collision filtering — category this shape belongs to.
     category_bits: u64 = 0x0001,
@@ -1007,22 +1019,25 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
 
     switch (collider.shape_type) {
         .box => {
-            const box = b2.b2MakeOffsetBox(collider.width / 2, collider.height / 2, .{ .x = collider.offset_x, .y = collider.offset_y }, b2.b2MakeRot(0));
+            // Collider dimensions are authored in PIXELS like the rest
+            // of the API (positions, forces, velocities, joints) — this
+            // is the one place they cross into box2d meters.
+            const box = b2.b2MakeOffsetBox(collider.width / ppm / 2, collider.height / ppm / 2, .{ .x = collider.offset_x / ppm, .y = collider.offset_y / ppm }, b2.b2MakeRot(0));
             _ = b2.b2CreatePolygonShape(body_id, &shape_def, &box);
         },
         .circle => {
             _ = b2.b2CreateCircleShape(body_id, &shape_def, &b2.b2Circle{
-                .center = .{ .x = collider.offset_x, .y = collider.offset_y },
-                .radius = collider.radius,
+                .center = .{ .x = collider.offset_x / ppm, .y = collider.offset_y / ppm },
+                .radius = collider.radius / ppm,
             });
         },
         .diamond => {
             // A 4-vertex diamond (rhombus) from width/height — the natural
             // footprint for isometric objects. Vertices: top, right, bottom, left.
-            const hw = collider.width / 2;
-            const hh = collider.height / 2;
-            const ox = collider.offset_x;
-            const oy = collider.offset_y;
+            const hw = collider.width / ppm / 2;
+            const hh = collider.height / ppm / 2;
+            const ox = collider.offset_x / ppm;
+            const oy = collider.offset_y / ppm;
             var pts = [_]b2.b2Vec2{
                 .{ .x = ox, .y = oy - hh },
                 .{ .x = ox + hw, .y = oy },
@@ -1225,4 +1240,119 @@ test "emitGameEvent no-ops when the game has no GameEvents decl" {
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
+}
+
+// ── Collider pixel-units contract (#3) ──
+//
+// Dimensions are authored in pixels and converted to box2d meters at
+// the attachShape boundary. These tests build a real world and read
+// the resulting shape geometry back through the box2d C API.
+
+const TestWorld = struct {
+    world: b2.b2WorldId,
+    body: b2.b2BodyId,
+
+    fn create() TestWorld {
+        var world_def = b2.b2DefaultWorldDef();
+        const world = b2.b2CreateWorld(&world_def);
+        var body_def = b2.b2DefaultBodyDef();
+        const body = b2.b2CreateBody(world, &body_def);
+        return .{ .world = world, .body = body };
+    }
+
+    fn destroy(self: *TestWorld) void {
+        b2.b2DestroyWorld(self.world);
+    }
+
+    fn onlyShape(self: *const TestWorld) b2.b2ShapeId {
+        var shapes: [1]b2.b2ShapeId = undefined;
+        std.debug.assert(b2.b2Body_GetShapes(self.body, &shapes, 1) == 1);
+        return shapes[0];
+    }
+};
+
+fn polyExtents(poly: b2.b2Polygon) struct { w: f32, h: f32, cx: f32, cy: f32 } {
+    var min_x: f32 = std.math.floatMax(f32);
+    var min_y: f32 = std.math.floatMax(f32);
+    var max_x: f32 = -std.math.floatMax(f32);
+    var max_y: f32 = -std.math.floatMax(f32);
+    const n: usize = @intCast(poly.count);
+    for (poly.vertices[0..n]) |v| {
+        min_x = @min(min_x, v.x);
+        min_y = @min(min_y, v.y);
+        max_x = @max(max_x, v.x);
+        max_y = @max(max_y, v.y);
+    }
+    return .{ .w = max_x - min_x, .h = max_y - min_y, .cx = (min_x + max_x) / 2, .cy = (min_y + max_y) / 2 };
+}
+
+test "attachShape converts box dimensions from pixels to meters" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+
+    // 100×50 px box offset by (10, 20) px; at ppm=50 → 2×1 m at (0.2, 0.4) m.
+    attachShape(tw.body, &.{
+        .shape_type = .box,
+        .width = 100,
+        .height = 50,
+        .offset_x = 10,
+        .offset_y = 20,
+    });
+
+    const ext = polyExtents(b2.b2Shape_GetPolygon(tw.onlyShape()));
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), ext.w, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), ext.h, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), ext.cx, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), ext.cy, 0.001);
+}
+
+test "attachShape converts circle radius and center from pixels to meters" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+
+    // 25 px radius, center offset (5, -10) px → 0.5 m at (0.1, -0.2) m.
+    attachShape(tw.body, &.{
+        .shape_type = .circle,
+        .radius = 25,
+        .offset_x = 5,
+        .offset_y = -10,
+    });
+
+    const circle = b2.b2Shape_GetCircle(tw.onlyShape());
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), circle.radius, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), circle.center.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.2), circle.center.y, 0.001);
+}
+
+test "attachShape converts diamond dimensions from pixels to meters" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+
+    // 80×40 px diamond, no offset → 1.6×0.8 m bounding extents.
+    attachShape(tw.body, &.{
+        .shape_type = .diamond,
+        .width = 80,
+        .height = 40,
+    });
+
+    const ext = polyExtents(b2.b2Shape_GetPolygon(tw.onlyShape()));
+    try std.testing.expectApproxEqAbs(@as(f32, 1.6), ext.w, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8), ext.h, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), ext.cx, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), ext.cy, 0.001);
+}
+
+test "attachShape conversion follows the live ppm setting" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+
+    // A game that re-tunes ppm must get consistently scaled colliders.
+    const saved = ppm;
+    ppm = 100.0;
+    defer ppm = saved;
+
+    attachShape(tw.body, &.{ .shape_type = .circle, .radius = 25 });
+
+    const circle = b2.b2Shape_GetCircle(tw.onlyShape());
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), circle.radius, 0.001);
 }
