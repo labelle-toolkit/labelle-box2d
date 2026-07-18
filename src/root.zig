@@ -1612,6 +1612,8 @@ test "attachShape converts segment endpoints from pixels to meters (#1)" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.4), seg.point1.y, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 3.2), seg.point2.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.4), seg.point2.y, 0.001);
+}
+
 test "attachShape converts capsule spine and radius from pixels to meters (#2)" {
     var tw = TestWorld.create();
     defer tw.destroy();
@@ -1630,9 +1632,33 @@ test "attachShape converts capsule spine and radius from pixels to meters (#2)" 
         .offset_y = 20,
     });
 
-    const cap = b2.b2Shape_GetCapsule(tw.onlyShape());
+    const cap = b2.b2Shape_GetCapsule(try tw.onlyShape());
     try std.testing.expectApproxEqAbs(@as(f32, -0.6), cap.center1.y, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 1.4), cap.center2.y, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.2), cap.center1.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), cap.center2.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), cap.radius, 0.001);
+}
+
+test "attachShape: coincident capsule endpoints silently degrade to a circle (#18)" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+    ppm = 50;
+
+    // Zero-length spine — box2d turns it into a circle. Pinning this
+    // down because the shape TYPE changes: b2Shape_GetCapsule on such
+    // a shape reads garbage, so consumers must check b2Shape_GetType.
+    attachShape(tw.body, &.{
+        .shape_type = .capsule,
+        .capsule_x1 = 10,
+        .capsule_y1 = 10,
+        .capsule_x2 = 10,
+        .capsule_y2 = 10,
+        .radius = 25,
+    });
+
+    const shape = try tw.onlyShape();
+    try std.testing.expect(b2.b2Shape_GetType(shape) == b2.b2_circleShape);
+    const circle = b2.b2Shape_GetCircle(shape);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), circle.radius, 0.001);
 }
