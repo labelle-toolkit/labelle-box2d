@@ -434,6 +434,12 @@ pub const PhysicsBody = struct {
     bullet: bool = false,
     _body_id: b2.b2BodyId = std.mem.zeroes(b2.b2BodyId),
     _synced: bool = false,
+    // Anchor offset (pixels) from the entity Position to the body
+    // centre, captured at first sync (see ColliderAnchor). Used on
+    // every sync-back and teleport — cached here so neither path
+    // needs a collider lookup.
+    _anchor_x: f32 = 0,
+    _anchor_y: f32 = 0,
 };
 
 pub const ShapeType = enum { box, circle, diamond };
@@ -708,11 +714,15 @@ pub fn getAngularVelocity(body: *const PhysicsBody) f32 {
     return b2.b2Body_GetAngularVelocity(body._body_id);
 }
 
-/// Teleport body to a new position (in pixels).
+/// Teleport the entity to a new `Position` (in pixels). The body
+/// transform receives the anchor offset captured at sync (see
+/// ColliderAnchor): for a top-left-anchored box the body's centre
+/// lands at `(x + width/2, y + height/2)`, so the next sync-back
+/// reports `Position == (x, y)` exactly.
 pub fn setBodyPosition(body: *const PhysicsBody, x: f32, y: f32) void {
     if (!body._synced) return;
     const rot = b2.b2Body_GetRotation(body._body_id);
-    b2.b2Body_SetTransform(body._body_id, .{ .x = x / ppm, .y = y / ppm }, rot);
+    b2.b2Body_SetTransform(body._body_id, .{ .x = (x + body._anchor_x) / ppm, .y = (y + body._anchor_y) / ppm }, rot);
 }
 
 /// Get body rotation angle (radians).
@@ -803,6 +813,8 @@ fn syncNewBodies(game: anytype) void {
         const pos: *const Position = result.comp_1;
         const collider = game.ecs_backend.getComponent(result.entity, PhysicsCollider);
         const anchor = anchorOffsetPx(collider);
+        body._anchor_x = anchor.x;
+        body._anchor_y = anchor.y;
         const px = (pos.x + anchor.x) / ppm;
         const py = (pos.y + anchor.y) / ppm;
 
@@ -850,10 +862,9 @@ fn syncPositionsBack(game: anytype) void {
         if (body.body_type == .static) continue;
 
         const b2_pos = b2.b2Body_GetPosition(body._body_id);
-        const anchor = anchorOffsetPx(game.ecs_backend.getComponent(result.entity, PhysicsCollider));
         const pos: *Position = result.comp_1;
-        pos.x = b2_pos.x * ppm - anchor.x;
-        pos.y = b2_pos.y * ppm - anchor.y;
+        pos.x = b2_pos.x * ppm - body._anchor_x;
+        pos.y = b2_pos.y * ppm - body._anchor_y;
         game.renderer.markPositionDirty(result.entity);
     }
 }
@@ -1426,4 +1437,25 @@ test "anchorOffsetPx: center anchor and missing collider never offset" {
     try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&centered).y);
     try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(null).x);
     try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(null).y);
+}
+
+test "setBodyPosition applies the cached anchor offset" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+
+    // Teleport a top-left-anchored 100×50 box (anchor 50,25) to
+    // Position (200, 100): the body centre must land at
+    // ((200+50)/50, (100+25)/50) = (5, 2.5) m so sync-back reports
+    // the requested Position exactly.
+    const body: PhysicsBody = .{
+        ._body_id = tw.body,
+        ._synced = true,
+        ._anchor_x = 50,
+        ._anchor_y = 25,
+    };
+    setBodyPosition(&body, 200, 100);
+
+    const p = b2.b2Body_GetPosition(tw.body);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), p.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), p.y, 0.001);
 }
