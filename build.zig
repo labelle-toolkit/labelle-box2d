@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -65,6 +66,20 @@ pub fn build(b: *std.Build) void {
         mod.addCMacro("BOX2D_DISABLE_SIMD", "1");
     }
 
+    // Android cross-compilation: Zig ships no libc headers for the
+    // Android target, so box2d's C sources cannot find <math.h> etc.
+    // (35x `'math.h' file not found` in box2d/math_functions.h). Those
+    // headers live in the Android NDK sysroot. Plumb the NDK sysroot
+    // include paths into both the box2d C library artifact (where the C
+    // sources compile) and the plugin module (which @cImports the box2d
+    // headers) — mirrors the iOS `ios_sdk_path` and emscripten blocks
+    // above, and labelle-bgfx's own Android sysroot wiring. Gated on the
+    // Android ABI so desktop / iOS / wasm builds are untouched.
+    if (target.result.abi == .android or target.result.abi == .androideabi) {
+        applyAndroidNdkSysroot(b, box2d_lib.root_module, target);
+        applyAndroidNdkSysroot(b, mod, target);
+    }
+
     // labelle-core: injected by the assembler at build time via addImport.
     // When building standalone (tests, remote fetch), use the lazy dependency.
     if (b.lazyDependency("labelle_core", .{ .target = target, .optimize = optimize })) |core_dep| {
@@ -75,4 +90,74 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = mod });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// Add the Android NDK sysroot include/library paths + API-level define
+/// to a C-compiling module so its C sources and @cImport translation
+/// find Bionic's <math.h>/<stdlib.h>/etc. Mirrors labelle-bgfx's
+/// `applyNdkSysroot`. Panics with an actionable message if the NDK
+/// can't be located (only called on the Android path).
+fn applyAndroidNdkSysroot(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    const sysroot = androidNdkSysroot(b) orelse
+        @panic("Could not find Android NDK. Set ANDROID_NDK_HOME or ANDROID_HOME.");
+    const triple: []const u8 = switch (target.result.cpu.arch) {
+        .aarch64 => "aarch64-linux-android",
+        .x86_64 => "x86_64-linux-android",
+        .arm, .thumb => "arm-linux-androideabi",
+        .x86 => "i686-linux-android",
+        else => @panic("unsupported Android arch for box2d"),
+    };
+    // Match the toolkit's default Android min_sdk (28).
+    const api = "28";
+    mod.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
+    mod.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include", triple }) });
+    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/lib", triple, api }) });
+    mod.addCMacro("__ANDROID_API__", api);
+    // Android .so consumers need PIC in every archived .o.
+    mod.pic = true;
+}
+
+/// Locate the Android NDK sysroot, mirroring labelle-bgfx's resolver:
+/// `ANDROID_NDK_HOME` first, then `ANDROID_HOME/ndk/<latest>`. Uses the
+/// Zig 0.16 `std.Io.Dir` APIs (getEnvVarOwned / std.fs.cwd() removed).
+/// Returns null if neither resolves to an existing sysroot.
+fn androidNdkSysroot(b: *std.Build) ?[]const u8 {
+    const io = b.graph.io;
+    const host_tag = switch (builtin.os.tag) {
+        .linux => "linux-x86_64",
+        .macos => "darwin-x86_64",
+        .windows => "windows-x86_64",
+        else => "linux-x86_64",
+    };
+    // 1. ANDROID_NDK_HOME
+    if (b.graph.environ_map.get("ANDROID_NDK_HOME")) |ndk_home| {
+        const sysroot = b.pathJoin(&.{ ndk_home, "toolchains", "llvm", "prebuilt", host_tag, "sysroot" });
+        if (std.Io.Dir.cwd().access(io, sysroot, .{})) |_| return sysroot else |_| {}
+    }
+    // 2. ANDROID_HOME/ndk/<latest>
+    if (b.graph.environ_map.get("ANDROID_HOME")) |home| {
+        const ndk_dir = b.pathJoin(&.{ home, "ndk" });
+        var dir = std.Io.Dir.cwd().openDir(io, ndk_dir, .{ .iterate = true }) catch return null;
+        defer dir.close(io);
+        var latest: ?[]const u8 = null;
+        var iter = dir.iterate();
+        while (iter.next(io) catch null) |entry| {
+            if (entry.kind == .directory) {
+                if (latest) |prev| {
+                    if (std.mem.order(u8, entry.name, prev) == .gt) {
+                        b.allocator.free(prev);
+                        latest = b.allocator.dupe(u8, entry.name) catch null;
+                    }
+                } else {
+                    latest = b.allocator.dupe(u8, entry.name) catch null;
+                }
+            }
+        }
+        if (latest) |version| {
+            defer b.allocator.free(version);
+            const sysroot = b.pathJoin(&.{ ndk_dir, version, "toolchains", "llvm", "prebuilt", host_tag, "sysroot" });
+            if (std.Io.Dir.cwd().access(io, sysroot, .{})) |_| return sysroot else |_| {}
+        }
+    }
+    return null;
 }
