@@ -438,6 +438,20 @@ pub const PhysicsBody = struct {
 
 pub const ShapeType = enum { box, circle, diamond };
 
+/// How a box/diamond collider is anchored to the entity `Position`.
+///   top_left (default) — `Position` is the shape's top-left corner,
+///       matching the gfx rectangle-`Shape` convention (renders from
+///       top-left, rotates about `pos + (w/2, h/2)`). The body is
+///       created at `pos + (width/2, height/2)` so visual and physics
+///       align — including under rotation, since both pivot on the
+///       same centre.
+///   center — `Position` is the shape's centre. Choose this for
+///       sprite-backed entities (sprite pivot defaults to centre) and
+///       for pre-0.5.0 behaviour: bodies were always centre-anchored.
+/// Ignored for `.circle` colliders — circles are centre-anchored on
+/// both the gfx and box2d sides, so there is no mismatch to fix.
+pub const ColliderAnchor = enum { top_left, center };
+
 /// Collider component with collision filtering.
 ///
 /// **Dimensions are in PIXELS** (matching `Position`, visual `Shape`,
@@ -462,6 +476,9 @@ pub const PhysicsCollider = struct {
     offset_x: f32 = 0,
     /// Shape offset from the body position, pixels.
     offset_y: f32 = 0,
+    /// Anchor of the entity Position relative to the shape — see
+    /// ColliderAnchor. Only meaningful for box/diamond.
+    anchor: ColliderAnchor = .top_left,
     /// Collision filtering — category this shape belongs to.
     category_bits: u64 = 0x0001,
     /// Collision filtering — categories this shape collides with.
@@ -763,6 +780,18 @@ pub fn rayCast(origin_x: f32, origin_y: f32, target_x: f32, target_y: f32) RayRe
 // Internal: ECS ↔ Box2D sync
 // ══════════════════════════════════════════════════════════════
 
+/// Pixel offset from the entity `Position` to the collider's centre,
+/// per the anchor contract (see `ColliderAnchor`). Body creation adds
+/// it, sync-back subtracts it, so a top-left-anchored box's visual
+/// and physics rectangles coincide (and stay coincident when the body
+/// rotates — both sides pivot on the same centre).
+fn anchorOffsetPx(collider: ?*const PhysicsCollider) struct { x: f32, y: f32 } {
+    const c = collider orelse return .{ .x = 0, .y = 0 };
+    if (c.shape_type == .circle) return .{ .x = 0, .y = 0 };
+    if (c.anchor == .center) return .{ .x = 0, .y = 0 };
+    return .{ .x = c.width / 2, .y = c.height / 2 };
+}
+
 fn syncNewBodies(game: anytype) void {
     var iter = game.ecs_backend.query(.{ PhysicsBody, Position });
     defer iter.deinit(game.ecs_backend.alloc);
@@ -772,8 +801,10 @@ fn syncNewBodies(game: anytype) void {
         if (body._synced) continue;
 
         const pos: *const Position = result.comp_1;
-        const px = pos.x / ppm;
-        const py = pos.y / ppm;
+        const collider = game.ecs_backend.getComponent(result.entity, PhysicsCollider);
+        const anchor = anchorOffsetPx(collider);
+        const px = (pos.x + anchor.x) / ppm;
+        const py = (pos.y + anchor.y) / ppm;
 
         var body_def = b2.b2DefaultBodyDef();
         body_def.type = switch (body.body_type) {
@@ -792,8 +823,8 @@ fn syncNewBodies(game: anytype) void {
         body._body_id = b2.b2CreateBody(world_id, &body_def);
         body._synced = true;
 
-        if (game.ecs_backend.getComponent(result.entity, PhysicsCollider)) |collider| {
-            attachShape(body._body_id, collider);
+        if (collider) |c| {
+            attachShape(body._body_id, c);
         }
 
         if (!game.ecs_backend.hasComponent(result.entity, PhysicsTouching)) {
@@ -801,8 +832,8 @@ fn syncNewBodies(game: anytype) void {
         }
 
         // Auto-add Sensor component for sensor shapes
-        if (game.ecs_backend.getComponent(result.entity, PhysicsCollider)) |collider| {
-            if (collider.is_sensor and !game.ecs_backend.hasComponent(result.entity, PhysicsSensor)) {
+        if (collider) |c| {
+            if (c.is_sensor and !game.ecs_backend.hasComponent(result.entity, PhysicsSensor)) {
                 game.ecs_backend.addComponent(result.entity, PhysicsSensor{});
             }
         }
@@ -819,9 +850,10 @@ fn syncPositionsBack(game: anytype) void {
         if (body.body_type == .static) continue;
 
         const b2_pos = b2.b2Body_GetPosition(body._body_id);
+        const anchor = anchorOffsetPx(game.ecs_backend.getComponent(result.entity, PhysicsCollider));
         const pos: *Position = result.comp_1;
-        pos.x = b2_pos.x * ppm;
-        pos.y = b2_pos.y * ppm;
+        pos.x = b2_pos.x * ppm - anchor.x;
+        pos.y = b2_pos.y * ppm - anchor.y;
         game.renderer.markPositionDirty(result.entity);
     }
 }
@@ -1365,4 +1397,33 @@ test "attachShape conversion follows the live ppm setting" {
 
     const circle = b2.b2Shape_GetCircle(try tw.onlyShape());
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), circle.radius, 0.001);
+}
+
+// ── Anchor/pivot contract (#4) ──
+
+test "anchorOffsetPx: box and diamond offset by half dimensions" {
+    const box_col: PhysicsCollider = .{ .shape_type = .box, .width = 100, .height = 40 };
+    const box_off = anchorOffsetPx(&box_col);
+    try std.testing.expectEqual(@as(f32, 50), box_off.x);
+    try std.testing.expectEqual(@as(f32, 20), box_off.y);
+
+    const dia_col: PhysicsCollider = .{ .shape_type = .diamond, .width = 80, .height = 60 };
+    const dia_off = anchorOffsetPx(&dia_col);
+    try std.testing.expectEqual(@as(f32, 40), dia_off.x);
+    try std.testing.expectEqual(@as(f32, 30), dia_off.y);
+}
+
+test "anchorOffsetPx: circle never offsets, whatever the anchor" {
+    var circle_col: PhysicsCollider = .{ .shape_type = .circle, .radius = 25, .width = 100, .height = 40 };
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&circle_col).x);
+    circle_col.anchor = .center;
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&circle_col).x);
+}
+
+test "anchorOffsetPx: center anchor and missing collider never offset" {
+    const centered: PhysicsCollider = .{ .shape_type = .box, .width = 100, .height = 40, .anchor = .center };
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&centered).x);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&centered).y);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(null).x);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(null).y);
 }
