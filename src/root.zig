@@ -1162,11 +1162,15 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
             });
         },
         .capsule => {
-            // Spine endpoints are explicit geometry relative to the
-            // body, so `anchor` does not apply (same rule as segment).
+            // Spine endpoints are relative to the body plus the shared
+            // offset (same as every other shape). `anchor` does not
+            // apply: endpoints are explicit geometry, not a bounding
+            // box (same rule as segment).
+            const ox = collider.offset_x;
+            const oy = collider.offset_y;
             _ = b2.b2CreateCapsuleShape(body_id, &shape_def, &b2.b2Capsule{
-                .center1 = .{ .x = collider.capsule_x1 / ppm, .y = collider.capsule_y1 / ppm },
-                .center2 = .{ .x = collider.capsule_x2 / ppm, .y = collider.capsule_y2 / ppm },
+                .center1 = .{ .x = (collider.capsule_x1 + ox) / ppm, .y = (collider.capsule_y1 + oy) / ppm },
+                .center2 = .{ .x = (collider.capsule_x2 + ox) / ppm, .y = (collider.capsule_y2 + oy) / ppm },
                 .radius = collider.radius / ppm,
             });
         },
@@ -1606,7 +1610,9 @@ test "attachShape converts capsule spine and radius from pixels to meters (#2)" 
     var tw = TestWorld.create();
     defer tw.destroy();
 
-    // Spine (0, -50)→(0, 50) px, radius 25 px → ±1 m, r 0.5 m.
+    // Spine (0, -50)→(0, 50) px, radius 25 px, offset (10, 20) px →
+    // spine ±1 m shifted by (0.2, 0.4) m, r 0.5 m. The shared offset
+    // applies to capsule endpoints like every other shape.
     attachShape(tw.body, &.{
         .shape_type = .capsule,
         .capsule_x1 = 0,
@@ -1614,11 +1620,13 @@ test "attachShape converts capsule spine and radius from pixels to meters (#2)" 
         .capsule_x2 = 0,
         .capsule_y2 = 50,
         .radius = 25,
+        .offset_x = 10,
+        .offset_y = 20,
     });
 
     const cap = b2.b2Shape_GetCapsule(tw.onlyShape());
-    try std.testing.expectApproxEqAbs(@as(f32, -1.0), cap.center1.y, 0.001);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), cap.center2.y, 0.001);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), cap.center1.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.6), cap.center1.y, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.4), cap.center2.y, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), cap.center1.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), cap.radius, 0.001);
 }
