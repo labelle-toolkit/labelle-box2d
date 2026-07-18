@@ -445,7 +445,7 @@ pub const PhysicsBody = struct {
     _anchor_y: f32 = 0,
 };
 
-pub const ShapeType = enum { box, circle, diamond, segment };
+pub const ShapeType = enum { box, circle, diamond, segment, capsule };
 
 /// How a box/diamond collider is anchored to the entity `Position`.
 ///   top_left (default) — `Position` is the shape's top edge / left
@@ -506,6 +506,17 @@ pub const PhysicsCollider = struct {
     segment_x2: f32 = 50,
     /// Segment only: see `segment_x1` (and its static-bodies note).
     segment_y2: f32 = 0,
+    /// Capsule only: spine endpoints relative to the body position,
+    /// pixels. The capsule is the stadium swept by `radius` around the
+    /// segment (x1,y1)→(x2,y2) — the canonical character collider
+    /// (slides over surfaces without catching box corners).
+    capsule_x1: f32 = 0,
+    /// Capsule only: first spine endpoint, pixels.
+    capsule_y1: f32 = -25,
+    /// Capsule only: second spine endpoint, pixels.
+    capsule_x2: f32 = 0,
+    /// Capsule only: second spine endpoint, pixels.
+    capsule_y2: f32 = 25,
     /// Collision filtering — category this shape belongs to.
     category_bits: u64 = 0x0001,
     /// Collision filtering — categories this shape collides with.
@@ -826,9 +837,10 @@ fn anchorOffsetPx(collider: ?*const PhysicsCollider) struct { x: f32, y: f32 } {
     // are unused, so the box expression would offset them by the
     // meaningless defaults.
     return switch (c.shape_type) {
-        // Explicit-geometry shapes (segment endpoints are authored
-        // relative to the body) and circles anchor at the centre.
-        .circle, .segment => .{ .x = 0, .y = 0 },
+        // Explicit-geometry shapes (segment/capsule endpoints are
+        // authored relative to the body) and circles anchor at the
+        // centre.
+        .circle, .segment, .capsule => .{ .x = 0, .y = 0 },
         // World space is y-up: the gfx rectangle renders from the
         // TOP edge of `Position` downward (screen-space top-left maps
         // to world y ∈ [P.y − h, P.y]), so its centre is
@@ -1147,6 +1159,15 @@ fn attachShape(body_id: b2.b2BodyId, collider: *const PhysicsCollider) void {
             _ = b2.b2CreateSegmentShape(body_id, &shape_def, &b2.b2Segment{
                 .point1 = .{ .x = (collider.segment_x1 + ox) / ppm, .y = (collider.segment_y1 + oy) / ppm },
                 .point2 = .{ .x = (collider.segment_x2 + ox) / ppm, .y = (collider.segment_y2 + oy) / ppm },
+            });
+        },
+        .capsule => {
+            // Spine endpoints are explicit geometry relative to the
+            // body, so `anchor` does not apply (same rule as segment).
+            _ = b2.b2CreateCapsuleShape(body_id, &shape_def, &b2.b2Capsule{
+                .center1 = .{ .x = collider.capsule_x1 / ppm, .y = collider.capsule_y1 / ppm },
+                .center2 = .{ .x = collider.capsule_x2 / ppm, .y = collider.capsule_y2 / ppm },
+                .radius = collider.radius / ppm,
             });
         },
     }
@@ -1497,6 +1518,38 @@ test "anchorOffsetPx: segment endpoints are explicit geometry — never offset" 
     try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&seg_col).y);
 }
 
+test "anchorOffsetPx: capsule spine endpoints are explicit geometry — never offset" {
+    const cap_col: PhysicsCollider = .{ .shape_type = .capsule, .width = 100, .height = 40 };
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&cap_col).x);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&cap_col).y);
+}
+
+test "a capsule body's transform is anchor-free even with the default top_left anchor (#18)" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+    ppm = 50;
+
+    // The default anchor is .top_left; for a capsule that must NOT
+    // shift the body by the (unused) width/height halves — the body's
+    // transform is the entity Position, full stop. Simulate the sync
+    // contract: a body created at pos + anchorOffset.
+    const col: PhysicsCollider = .{ .shape_type = .capsule, .radius = 25 };
+    const anchor = anchorOffsetPx(&col);
+    const pos_x: f32 = 200;
+    const pos_y: f32 = 100;
+    const body: PhysicsBody = .{
+        ._body_id = tw.body,
+        ._synced = true,
+        ._anchor_x = anchor.x,
+        ._anchor_y = anchor.y,
+    };
+    setBodyPosition(&body, pos_x, pos_y);
+
+    const p = b2.b2Body_GetPosition(tw.body);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), p.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), p.y, 0.001);
+}
+
 test "anchorOffsetPx: center anchor and missing collider never offset" {
     const centered: PhysicsCollider = .{ .shape_type = .box, .width = 100, .height = 40, .anchor = .center };
     try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&centered).x);
@@ -1549,4 +1602,23 @@ test "attachShape converts segment endpoints from pixels to meters (#1)" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.4), seg.point1.y, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 3.2), seg.point2.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.4), seg.point2.y, 0.001);
+test "attachShape converts capsule spine and radius from pixels to meters (#2)" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+
+    // Spine (0, -50)→(0, 50) px, radius 25 px → ±1 m, r 0.5 m.
+    attachShape(tw.body, &.{
+        .shape_type = .capsule,
+        .capsule_x1 = 0,
+        .capsule_y1 = -50,
+        .capsule_x2 = 0,
+        .capsule_y2 = 50,
+        .radius = 25,
+    });
+
+    const cap = b2.b2Shape_GetCapsule(tw.onlyShape());
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), cap.center1.y, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), cap.center2.y, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), cap.center1.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), cap.radius, 0.001);
 }
