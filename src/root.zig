@@ -434,9 +434,35 @@ pub const PhysicsBody = struct {
     bullet: bool = false,
     _body_id: b2.b2BodyId = std.mem.zeroes(b2.b2BodyId),
     _synced: bool = false,
+    // Anchor offset (pixels) from the entity Position to the body
+    // centre, captured at first sync (see ColliderAnchor). Used on
+    // every sync-back and teleport — cached here so neither path
+    // needs a collider lookup.
+    _anchor_x: f32 = 0,
+    _anchor_y: f32 = 0,
 };
 
 pub const ShapeType = enum { box, circle, diamond };
+
+/// How a box/diamond collider is anchored to the entity `Position`.
+///   top_left (default) — `Position` is the shape's top edge / left
+///       corner in world space. The world is y-up: the gfx rectangle
+///       renders from the screen-space top-left, which maps to world
+///       `y ∈ [P.y − h, P.y]` — so the body is created at
+///       `(P.x + width/2, P.y − height/2)` and visual and physics
+///       align, including under rotation (both pivot on the same
+///       centre).
+///   center — `Position` is the shape's centre. Choose this for
+///       sprite-backed entities (sprite pivot defaults to centre) and
+///       for pre-0.5.0 behaviour: bodies were always centre-anchored.
+/// Ignored for `.circle` colliders — circles are centre-anchored on
+/// both the gfx and box2d sides, so there is no mismatch to fix.
+///
+/// The offset is captured into `PhysicsBody._anchor_*` when the body
+/// is first synced (shapes are only attached then), so mutating
+/// `width`/`height`/`anchor` after body creation has no effect on the
+/// anchor — recreate the body to change it.
+pub const ColliderAnchor = enum { top_left, center };
 
 /// Collider component with collision filtering.
 ///
@@ -462,6 +488,9 @@ pub const PhysicsCollider = struct {
     offset_x: f32 = 0,
     /// Shape offset from the body position, pixels.
     offset_y: f32 = 0,
+    /// Anchor of the entity Position relative to the shape — see
+    /// ColliderAnchor. Only meaningful for box/diamond.
+    anchor: ColliderAnchor = .top_left,
     /// Collision filtering — category this shape belongs to.
     category_bits: u64 = 0x0001,
     /// Collision filtering — categories this shape collides with.
@@ -691,11 +720,15 @@ pub fn getAngularVelocity(body: *const PhysicsBody) f32 {
     return b2.b2Body_GetAngularVelocity(body._body_id);
 }
 
-/// Teleport body to a new position (in pixels).
+/// Teleport the entity to a new `Position` (in pixels). The body
+/// transform receives the anchor offset captured at sync (see
+/// ColliderAnchor): for a top-left-anchored box the body's centre
+/// lands at `(x + width/2, y − height/2)`, so the next sync-back
+/// reports `Position == (x, y)` exactly.
 pub fn setBodyPosition(body: *const PhysicsBody, x: f32, y: f32) void {
     if (!body._synced) return;
     const rot = b2.b2Body_GetRotation(body._body_id);
-    b2.b2Body_SetTransform(body._body_id, .{ .x = x / ppm, .y = y / ppm }, rot);
+    b2.b2Body_SetTransform(body._body_id, .{ .x = (x + body._anchor_x) / ppm, .y = (y + body._anchor_y) / ppm }, rot);
 }
 
 /// Get body rotation angle (radians).
@@ -763,6 +796,30 @@ pub fn rayCast(origin_x: f32, origin_y: f32, target_x: f32, target_y: f32) RayRe
 // Internal: ECS ↔ Box2D sync
 // ══════════════════════════════════════════════════════════════
 
+/// Pixel offset from the entity `Position` to the collider's centre,
+/// per the anchor contract (see `ColliderAnchor`). Body creation adds
+/// it, sync-back subtracts it, so a top-left-anchored box's visual
+/// and physics rectangles coincide (and stay coincident when the body
+/// rotates — both sides pivot on the same centre).
+fn anchorOffsetPx(collider: ?*const PhysicsCollider) struct { x: f32, y: f32 } {
+    const c = collider orelse return .{ .x = 0, .y = 0 };
+    if (c.anchor == .center) return .{ .x = 0, .y = 0 };
+    // Exhaustive on purpose: adding a ShapeType member without deciding
+    // its anchoring must fail compile. Explicit-geometry shapes whose
+    // fields are authored relative to the body (segments, capsules)
+    // belong in the zero branch, NOT here — their width/height fields
+    // are unused, so the box expression would offset them by the
+    // meaningless defaults.
+    return switch (c.shape_type) {
+        .circle => .{ .x = 0, .y = 0 },
+        // World space is y-up: the gfx rectangle renders from the
+        // TOP edge of `Position` downward (screen-space top-left maps
+        // to world y ∈ [P.y − h, P.y]), so its centre is
+        // (P.x + w/2, P.y − h/2) — the y term is NEGATIVE.
+        .box, .diamond => .{ .x = c.width / 2, .y = -c.height / 2 },
+    };
+}
+
 fn syncNewBodies(game: anytype) void {
     var iter = game.ecs_backend.query(.{ PhysicsBody, Position });
     defer iter.deinit(game.ecs_backend.alloc);
@@ -772,8 +829,12 @@ fn syncNewBodies(game: anytype) void {
         if (body._synced) continue;
 
         const pos: *const Position = result.comp_1;
-        const px = pos.x / ppm;
-        const py = pos.y / ppm;
+        const collider = game.ecs_backend.getComponent(result.entity, PhysicsCollider);
+        const anchor = anchorOffsetPx(collider);
+        body._anchor_x = anchor.x;
+        body._anchor_y = anchor.y;
+        const px = (pos.x + anchor.x) / ppm;
+        const py = (pos.y + anchor.y) / ppm;
 
         var body_def = b2.b2DefaultBodyDef();
         body_def.type = switch (body.body_type) {
@@ -792,17 +853,20 @@ fn syncNewBodies(game: anytype) void {
         body._body_id = b2.b2CreateBody(world_id, &body_def);
         body._synced = true;
 
-        if (game.ecs_backend.getComponent(result.entity, PhysicsCollider)) |collider| {
-            attachShape(body._body_id, collider);
+        if (collider) |c| {
+            attachShape(body._body_id, c);
         }
 
         if (!game.ecs_backend.hasComponent(result.entity, PhysicsTouching)) {
             game.ecs_backend.addComponent(result.entity, PhysicsTouching{});
         }
 
-        // Auto-add Sensor component for sensor shapes
-        if (game.ecs_backend.getComponent(result.entity, PhysicsCollider)) |collider| {
-            if (collider.is_sensor and !game.ecs_backend.hasComponent(result.entity, PhysicsSensor)) {
+        // Auto-add Sensor component for sensor shapes. RE-FETCH the
+        // collider: the addComponent above may have moved component
+        // storage on some ECS backends, invalidating the earlier
+        // pointer (codex review on #16).
+        if (game.ecs_backend.getComponent(result.entity, PhysicsCollider)) |c| {
+            if (c.is_sensor and !game.ecs_backend.hasComponent(result.entity, PhysicsSensor)) {
                 game.ecs_backend.addComponent(result.entity, PhysicsSensor{});
             }
         }
@@ -820,8 +884,8 @@ fn syncPositionsBack(game: anytype) void {
 
         const b2_pos = b2.b2Body_GetPosition(body._body_id);
         const pos: *Position = result.comp_1;
-        pos.x = b2_pos.x * ppm;
-        pos.y = b2_pos.y * ppm;
+        pos.x = b2_pos.x * ppm - body._anchor_x;
+        pos.y = b2_pos.y * ppm - body._anchor_y;
         game.renderer.markPositionDirty(result.entity);
     }
 }
@@ -1365,4 +1429,56 @@ test "attachShape conversion follows the live ppm setting" {
 
     const circle = b2.b2Shape_GetCircle(try tw.onlyShape());
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), circle.radius, 0.001);
+}
+
+// ── Anchor/pivot contract (#4) ──
+
+test "anchorOffsetPx: box and diamond offset by half dimensions" {
+    // y-up world: the visual rect extends DOWNWARD from Position, so
+    // its centre is (P.x + w/2, P.y − h/2) — negative y term.
+    const box_col: PhysicsCollider = .{ .shape_type = .box, .width = 100, .height = 40 };
+    const box_off = anchorOffsetPx(&box_col);
+    try std.testing.expectEqual(@as(f32, 50), box_off.x);
+    try std.testing.expectEqual(@as(f32, -20), box_off.y);
+
+    const dia_col: PhysicsCollider = .{ .shape_type = .diamond, .width = 80, .height = 60 };
+    const dia_off = anchorOffsetPx(&dia_col);
+    try std.testing.expectEqual(@as(f32, 40), dia_off.x);
+    try std.testing.expectEqual(@as(f32, -30), dia_off.y);
+}
+
+test "anchorOffsetPx: circle never offsets, whatever the anchor" {
+    var circle_col: PhysicsCollider = .{ .shape_type = .circle, .radius = 25, .width = 100, .height = 40 };
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&circle_col).x);
+    circle_col.anchor = .center;
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&circle_col).x);
+}
+
+test "anchorOffsetPx: center anchor and missing collider never offset" {
+    const centered: PhysicsCollider = .{ .shape_type = .box, .width = 100, .height = 40, .anchor = .center };
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&centered).x);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(&centered).y);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(null).x);
+    try std.testing.expectEqual(@as(f32, 0), anchorOffsetPx(null).y);
+}
+
+test "setBodyPosition applies the cached anchor offset" {
+    var tw = TestWorld.create();
+    defer tw.destroy();
+
+    // Teleport a top-left-anchored 100×50 box (anchor +50, −25) to
+    // Position (200, 100): the body centre must land at
+    // ((200+50)/50, (100−25)/50) = (5, 1.5) m so sync-back reports
+    // the requested Position exactly.
+    const body: PhysicsBody = .{
+        ._body_id = tw.body,
+        ._synced = true,
+        ._anchor_x = 50,
+        ._anchor_y = -25,
+    };
+    setBodyPosition(&body, 200, 100);
+
+    const p = b2.b2Body_GetPosition(tw.body);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), p.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), p.y, 0.001);
 }

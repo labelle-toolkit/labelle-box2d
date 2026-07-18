@@ -64,6 +64,12 @@ No script needed for physics — the plugin's `Systems` handle everything automa
 
 All components are auto-discovered by the engine's `ComponentRegistryWithPlugins`.
 
+### Units & anchoring
+
+Collider `width`/`height`/`radius`/`offset` are in **pixels** (matching `Position` and visual `Shape`), converted to box2d meters internally via `ppm`.
+
+Box/diamond colliders anchor `Position` at the shape's **top-left corner** by default (`anchor = .top_left`), matching how the renderer draws rectangles — the body is offset by half the dimensions so visual and physics coincide, including under rotation. For sprite-backed entities (sprite pivot defaults to centre), set `anchor = .center`. Circles are always centre-anchored. Anchor and collider dimensions are captured when the body is first synced — recreate the body if they change afterward.
+
 ## Collision Detection
 
 ### Polling (Touching component)
