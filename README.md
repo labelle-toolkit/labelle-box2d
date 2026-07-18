@@ -73,8 +73,8 @@ All components are auto-discovered by the engine's `ComponentRegistryWithPlugins
 | `.box` | `width`, `height` | Anchored per `anchor` (top-left by default, see below) |
 | `.diamond` | `width`, `height` | Rotated-square polygon; anchors like `.box` |
 | `.circle` | `radius` | Always centre-anchored |
-| `.segment` | `segment_x1/y1`, `segment_x2/y2` | Line between two endpoints; **two-sided** (collides from both sides). Effectively for `.static` bodies — a segment has zero area, so on a dynamic body box2d falls back to mass=1 with no rotational inertia and `density` is ignored |
-| `.capsule` | `capsule_x1/y1`, `capsule_x2/y2`, `radius` | Stadium swept by `radius` around the spine (x1,y1)→(x2,y2) — the canonical character collider (slides over surfaces without catching box corners). `radius` must be > 0; coincident endpoints silently degrade to a circle |
+| `.segment` | `segment_x1`, `segment_y1`, `segment_x2`, `segment_y2` | Line between two endpoints; **two-sided** (collides from both sides). Effectively for `.static` bodies — a segment has zero area, so on a dynamic body box2d falls back to mass=1 with no rotational inertia and `density` is ignored |
+| `.capsule` | `capsule_x1`, `capsule_y1`, `capsule_x2`, `capsule_y2`, `radius` | Stadium swept by `radius` around the spine `(capsule_x1, capsule_y1) → (capsule_x2, capsule_y2)` — the canonical character collider (slides over surfaces without catching box corners). `radius` must be > 0; coincident endpoints silently degrade to a circle |
 
 ```zig
 // One-way-looking floor (physics is still two-sided)
@@ -93,7 +93,7 @@ g.ecs_backend.addComponent(player, box2d.PhysicsCollider{
 });
 ```
 
-Segment/capsule geometry is authored relative to the body position (endpoints carry their own offsets), so the box/diamond `anchor` setting does not apply to them.
+Segment/capsule geometry is authored relative to the body position, so the box/diamond `anchor` setting does not apply to them — but the shared `offset_x`/`offset_y` fields still do: the runtime adds them to every endpoint before conversion.
 
 ### Units & anchoring
 
