@@ -750,6 +750,14 @@ pub fn destroyJoint(joint_id: JointId) void {
 /// to every synced body), so no extra setup is required. Used for the
 /// grounded jump gate; also public so game code can query "can this
 /// entity jump?".
+///
+/// Known approximation (gemini on #21): contacts are not filtered by
+/// normal, so a body pressed against a WALL with near-zero vertical
+/// velocity (e.g. held by friction) counts as grounded — mid-fall wall
+/// touches don't, because |vy| exceeds `ground_eps`. Games that must
+/// distinguish floor from wall need a contact-normal query — a
+/// deliberate follow-up (the `box2d__collision_hit` events already
+/// carry normals).
 pub fn isGrounded(game: anytype, entity: u32, ground_eps: f32) bool {
     const body = game.ecs_backend.getComponent(entity, PhysicsBody) orelse return false;
     if (!body._synced) return false;
