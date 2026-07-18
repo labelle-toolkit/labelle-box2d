@@ -23,7 +23,7 @@ g.setPosition(ball, .{ .x = 0, .y = 200 });
 g.ecs_backend.addComponent(ball, box2d.PhysicsBody{});
 g.ecs_backend.addComponent(ball, box2d.PhysicsCollider{
     .shape_type = .circle,
-    .radius = 0.3,
+    .radius = 15, // pixels — matches the 15px visual circle
     .restitution = 0.5,
 });
 
@@ -33,8 +33,8 @@ g.setPosition(ground, .{ .x = 0, .y = -270 });
 g.ecs_backend.addComponent(ground, box2d.PhysicsBody{ .body_type = .static });
 g.ecs_backend.addComponent(ground, box2d.PhysicsCollider{
     .shape_type = .box,
-    .width = 16.0,
-    .height = 1.0,
+    .width = 800,
+    .height = 50,
 });
 ```
 
@@ -46,7 +46,7 @@ Or use prefabs:
     .components = .{
         .Shape = .{ .shape = .{ .circle = .{ .radius = 15 } }, .color = .{ .r = 255, .g = 100, .b = 50, .a = 255 } },
         .RigidBody = .{ .gravity_scale = 1.0 },
-        .Collider = .{ .shape_type = .circle, .radius = 0.3, .restitution = 0.5 },
+        .Collider = .{ .shape_type = .circle, .radius = 15, .restitution = 0.5 },
     },
 }
 ```
@@ -101,7 +101,7 @@ Trigger volumes that detect overlap without collision response:
 ```zig
 g.ecs_backend.addComponent(entity, box2d.PhysicsCollider{
     .shape_type = .circle,
-    .radius = 2.0,
+    .radius = 100, // pixels
     .is_sensor = true, // trigger volume, no collision
 });
 // PhysicsSensor component is auto-added
@@ -199,7 +199,7 @@ When `show_collision_gizmos` is enabled:
 - **`pub const Components`** — auto-discovered by `ComponentRegistryWithPlugins`
 - **`pub const Systems`** — auto-dispatched by `SystemRegistry`
 - **Box2D v3.1** via [allyourcodebase/box2d](https://github.com/allyourcodebase/box2d)
-- All positions in pixels, auto-converted to/from meters via `ppm`
+- All positions AND collider dimensions in pixels, auto-converted to/from meters via `ppm`
 - Coordinate system matches the engine (Y-up, origin at screen center)
 
 ## Requirements
