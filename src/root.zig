@@ -1013,7 +1013,7 @@ fn syncPositionsBack(game: anytype) void {
 /// Tolerant plugin-event emit (mirrors `Game.emitEngineEvent` in
 /// labelle-engine post-#578). The engine's `Game.emit(event)`
 /// requires a concrete `GameEvents` union value, so an anonymous
-/// struct literal like `game.emit(.{ .box2d__sensor_enter = … })`
+/// struct literal like `game.emit(.{ .box2d__<event> = … })`
 /// no longer coerces — it triggers `error: type 'void' does not
 /// support struct initialization syntax` whenever the project's
 /// `GameEvents` is `void` (unit tests, or any project the assembler
@@ -1356,17 +1356,25 @@ test "PinStyles block declares the expected box2d types" {
 // The @compileError branches — a missing required field and an
 // unknown payload field — are compile-time failures by design and
 // can't be runtime-tested.
+//
+// Tags here are SYNTHETIC (`prov__*`), never the plugin's real
+// `box2d__*` tags: the assembler's ungated-emit detector
+// (labelle-assembler#636) treats any dot-prefixed real tag in the
+// provider's source — test switch arms included — as an ungated emit
+// and force-keeps that event in every consuming game, defeating
+// elision. The helper's mechanics don't depend on the tag names;
+// real-tag coverage lives in consuming-game builds.
 
-/// A game whose GameEvents union declares the emitted tags.
-/// `collision_begin` uses u64 entity fields to prove the @intCast
-/// widening; `sensor_enter` carries a defaulted field the plugin's
+/// A game whose GameEvents union declares the emitted (synthetic)
+/// tags. `prov__begin` uses u64 entity fields to prove the @intCast
+/// widening; `prov__enter` carries a defaulted field the emitted
 /// payload omits.
 const EmitRecordingGame = struct {
     // `pub` on purpose: real games must export GameEvents for
     // cross-module access — mirror the production contract.
     pub const GameEvents = union(enum) {
-        box2d__collision_begin: struct { entity_a: u64, entity_b: u64 },
-        box2d__sensor_enter: struct {
+        prov__begin: struct { entity_a: u64, entity_b: u64 },
+        prov__enter: struct {
             sensor_entity: u32,
             visitor_entity: u32,
             extra: f32 = 99.5,
@@ -1384,40 +1392,40 @@ const EmitRecordingGame = struct {
 
 test "emitGameEvent builds the typed payload and widens int fields" {
     var game = EmitRecordingGame{};
-    emitGameEvent(&game, "box2d__collision_begin", .{
+    emitGameEvent(&game, "prov__begin", .{
         .entity_a = @as(u32, 7),
         .entity_b = @as(u32, 42),
     });
     try std.testing.expectEqual(@as(usize, 1), game.count);
     switch (game.last.?) {
-        .box2d__collision_begin => |p| {
+        .prov__begin => |p| {
             try std.testing.expectEqual(@as(u64, 7), p.entity_a);
             try std.testing.expectEqual(@as(u64, 42), p.entity_b);
         },
-        else => return error.TestExpectedCollisionBegin,
+        else => return error.TestExpectedBegin,
     }
 }
 
 test "emitGameEvent fills omitted fields from their declared defaults" {
     var game = EmitRecordingGame{};
-    emitGameEvent(&game, "box2d__sensor_enter", .{
+    emitGameEvent(&game, "prov__enter", .{
         .sensor_entity = @as(u32, 3),
         .visitor_entity = @as(u32, 9),
     });
     try std.testing.expectEqual(@as(usize, 1), game.count);
     switch (game.last.?) {
-        .box2d__sensor_enter => |p| {
+        .prov__enter => |p| {
             try std.testing.expectEqual(@as(u32, 3), p.sensor_entity);
             try std.testing.expectEqual(@as(u32, 9), p.visitor_entity);
             try std.testing.expectEqual(@as(f32, 99.5), p.extra);
         },
-        else => return error.TestExpectedSensorEnter,
+        else => return error.TestExpectedEnter,
     }
 }
 
 test "emitGameEvent no-ops when the union lacks the requested tag" {
     var game = EmitRecordingGame{};
-    emitGameEvent(&game, "box2d__collision_end", .{
+    emitGameEvent(&game, "prov__missing", .{
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
@@ -1435,7 +1443,7 @@ test "emitGameEvent no-ops for void and non-union GameEvents" {
         pub const GameEvents = void;
     };
     var void_game = VoidGame{};
-    emitGameEvent(&void_game, "box2d__collision_begin", .{
+    emitGameEvent(&void_game, "prov__begin", .{
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
@@ -1444,7 +1452,7 @@ test "emitGameEvent no-ops for void and non-union GameEvents" {
         pub const GameEvents = struct {};
     };
     var struct_game = StructGame{};
-    emitGameEvent(&struct_game, "box2d__collision_begin", .{
+    emitGameEvent(&struct_game, "prov__begin", .{
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
@@ -1454,7 +1462,7 @@ test "emitGameEvent no-ops when the game has no GameEvents decl" {
     // Same contract: compiling is the assertion.
     const BareGame = struct {};
     var game = BareGame{};
-    emitGameEvent(&game, "box2d__collision_begin", .{
+    emitGameEvent(&game, "prov__begin", .{
         .entity_a = @as(u32, 1),
         .entity_b = @as(u32, 2),
     });
