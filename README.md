@@ -155,6 +155,13 @@ via `OnEvent`:
 > The legacy `on_collision_*` / `on_sensor_*` raw-slot callbacks were
 > removed in 0.5.0 (RFC-PLUGIN-EVENTS phase 6). Use the events above.
 
+All emits go through the comptime-gated `emitGameEvent` helper (string
+tags, `@hasField`-checked), so the assembler can elide events no
+consuming game subscribes to. Plugin-authoring note: test code must use
+synthetic tags (`prov__ev`-style), not real ones — a dot-prefixed real
+tag anywhere in plugin source (even a test switch arm) force-keeps the
+event in every consuming game (labelle-assembler#636).
+
 ## Sensors
 
 Trigger volumes that detect overlap without collision response:
